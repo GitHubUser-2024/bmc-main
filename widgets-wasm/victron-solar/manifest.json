@@ -1,0 +1,71 @@
+{
+  "$schema": "../../bmc-widget-manifest/manifest.schema.json",
+  "uid": "99e3fa96-a60b-4cf1-a5e9-4da61b216067",
+  "version": "0.1.0",
+  "name": "Solar (Victron)",
+  "subname": "Home Assistant",
+  "description": "Live PV power and solar yield (today, this month, this year) from a Victron system via Home Assistant",
+  "binary": "bin/victron-solar",
+  "icon": "assets/icon.svg",
+  "category": "utility",
+  "settings": [
+    "localization"
+  ],
+  "supported_viewports": [
+    {
+      "type": "rectangular",
+      "min_width": 317,
+      "max_width": 1280,
+      "min_height": 238,
+      "max_height": 480
+    },
+    {
+      "type": "round",
+      "min_width": 480,
+      "max_width": 480,
+      "min_height": 480,
+      "max_height": 480
+    }
+  ],
+  "params": {
+    "ha_url": {
+      "name": "Home Assistant URL",
+      "description": "Base URL of your Home Assistant instance, e.g. http://homeassistant.local:8123",
+      "type": "string",
+      "format": "uri",
+      "default_value": "http://homeassistant.local:8123"
+    },
+    "entity_power": {
+      "name": "PV power entity",
+      "description": "Home Assistant entity ID for current solar power, in watts",
+      "type": "string",
+      "default_value": "sensor.victronsolarcharger_yield_pv224"
+    },
+    "entity_today": {
+      "name": "Today's yield entity",
+      "description": "Home Assistant entity ID for today's solar yield, in kWh",
+      "type": "string",
+      "default_value": "sensor.solar_yield_today"
+    },
+    "entity_month": {
+      "name": "This month's yield entity",
+      "description": "Home Assistant entity ID for this month's solar yield, in kWh (its 'last_period' attribute supplies last month's total)",
+      "type": "string",
+      "default_value": "sensor.solar_yield_this_month"
+    },
+    "entity_year": {
+      "name": "This year's yield entity",
+      "description": "Home Assistant entity ID for this year's solar yield, in kWh (its 'last_period' attribute supplies last year's total)",
+      "type": "string",
+      "default_value": "sensor.solar_yield_this_year"
+    }
+  },
+  "credentials": {
+    "ha": {
+      "type": "generic-token",
+      "label": "Home Assistant",
+      "description": "Long-lived access token for your Home Assistant instance",
+      "required": true
+    }
+  }
+}
