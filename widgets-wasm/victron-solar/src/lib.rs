@@ -145,7 +145,7 @@ mod wasm_glue {
     use super::manifest_params;
     use super::manifest_params::credentials as slots;
 
-    const REFRESH_MS: u32 = 30_000;
+    const REFRESH_MS: u32 = 5_000;
     const NOT_AVAILABLE: &str = "--";
     const BG_COLOR: Color = BLACK;
     const HEADER_COLOR: Color = GRAY_60;
