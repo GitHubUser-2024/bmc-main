@@ -135,6 +135,11 @@ stdenv.mkDerivation {
 
   patches = [
     ./opencl.patch
+    # Upstream 398d84e3 (in 26.3): a failed etnaviv submit handed back fence
+    # fd 0, so the fence wait polled whatever fd 0 was and its destroy closed
+    # it. Seen on the Deck as frozen screens (submit ENOSPC under GPU address
+    # space pressure) and "Failed to dup DMA-BUF fd".
+    ./etnaviv-stale-fence-fd.patch
   ];
 
   postPatch = ''
