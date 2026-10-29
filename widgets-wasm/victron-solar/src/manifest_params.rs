@@ -49,18 +49,18 @@ impl Connection {
 bmc_wasm_sdk::impl_manifest_str_enum!(Connection);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
-    pub connection: Connection,
+    pub connection: Option<Connection>,
     pub gx_host: String,
-    pub port: i32,
+    pub port: Option<i32>,
 }
 impl Params {
     /// Materialise a typed snapshot from a dynamic [`snapshot::Params`].
     #[must_use]
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
-            connection: <Connection as ParamRead>::read_required(snap, "connection"),
+            connection: <Connection as ParamRead>::read_optional(snap, "connection"),
             gx_host: <String as ParamRead>::read_required(snap, "gx_host"),
-            port: <i32 as ParamRead>::read_required(snap, "port"),
+            port: <i32 as ParamRead>::read_optional(snap, "port"),
         }
     }
     /// Latest typed snapshot delivered for this widget instance.

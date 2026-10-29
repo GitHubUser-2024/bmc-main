@@ -38,6 +38,7 @@
       "name": "Connection",
       "description": "How to read the data; the same service must be enabled on the device",
       "type": "string",
+      "optional": true,
       "default_value": "mqtt-tls",
       "enum_values": [
         {
@@ -59,6 +60,7 @@
       "name": "Port",
       "description": "0 = the connection's standard port (8883, 1883 or 502)",
       "type": "integer",
+      "optional": true,
       "min": 0,
       "max": 65535,
       "default_value": 0

@@ -169,7 +169,9 @@ mod wasm_glue {
     fn connect() {
         let params = manifest_params::Params::current();
         let host = params.gx_host.trim().to_string();
-        let (link, service, standard_port) = match params.connection {
+        // Optional, so widgets placed before these settings existed still start.
+        let connection = params.connection.unwrap_or(Connection::MqttTls);
+        let (link, service, standard_port) = match connection {
             Connection::MqttTls => (Link::default(), "MQTT", mqtt::TLS_PORT),
             Connection::Mqtt => (Link::default(), "MQTT", mqtt::PLAIN_PORT),
             Connection::Modbus => (
@@ -178,7 +180,7 @@ mod wasm_glue {
                 modbus::STANDARD_PORT,
             ),
         };
-        let port = u16::try_from(params.port)
+        let port = u16::try_from(params.port.unwrap_or(0))
             .ok()
             .filter(|&p| p != 0)
             .unwrap_or(standard_port);
@@ -198,7 +200,7 @@ mod wasm_glue {
             set_status(Status::Unreachable);
             return;
         }
-        SOCKET.set(if matches!(params.connection, Connection::MqttTls) {
+        SOCKET.set(if matches!(connection, Connection::MqttTls) {
             tls_connect_insecure(&host, port, on_socket_event)
         } else {
             tcp_connect(&host, port, on_socket_event)
