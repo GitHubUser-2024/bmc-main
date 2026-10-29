@@ -158,6 +158,17 @@ mod wasm_glue {
         )
     }
 
+    /// What's kept on the Deck goes into the instance's cache bucket on
+    /// flash: `kv` is memory-only on the Deck (the host gives it no
+    /// directory), so it would be lost on every widget restart.
+    fn store_get(key: &str) -> Option<String> {
+        cache::read_bytes(key).and_then(|e| String::from_utf8(e.bytes).ok())
+    }
+
+    fn store_put(key: &str, text: &str) {
+        cache::put(key, b"", text.as_bytes());
+    }
+
     fn ledger_key(portal: &str) -> String {
         fmt!("ledger-{}", portal)
     }
@@ -276,7 +287,7 @@ mod wasm_glue {
 
     /// The device answered with its id: pick up what was kept for it.
     fn adopt_portal(s: &mut Session, portal: &str) {
-        s.ledger = kv::get_string(&ledger_key(portal)).and_then(|t| Ledger::from_text(&t));
+        s.ledger = store_get(&ledger_key(portal)).and_then(|t| Ledger::from_text(&t));
         s.portal = Some(portal.to_string());
         s.status = Some(Status::Live);
     }
@@ -340,7 +351,7 @@ mod wasm_glue {
                         "victron-solar: serial {}, scanning for solar devices",
                         serial
                     );
-                    poller.yield_counters = kv::get_string(&yield_counters_key(&serial))
+                    poller.yield_counters = store_get(&yield_counters_key(&serial))
                         .and_then(|t| YieldCounters::from_text(&t))
                         .unwrap_or_default();
                     portal = Some(serial);
@@ -364,10 +375,7 @@ mod wasm_glue {
                 && let Some(p) = s.portal.as_deref()
             {
                 poller.yield_counters.dirty = false;
-                kv::set(
-                    &yield_counters_key(p),
-                    poller.yield_counters.to_text().as_bytes(),
-                );
+                store_put(&yield_counters_key(p), &poller.yield_counters.to_text());
             }
         }
         if let Some(portal) = portal {
@@ -398,11 +406,11 @@ mod wasm_glue {
                     };
                     let ledger = s.ledger.as_ref().expect("set above");
                     if changed {
-                        kv::set(&ledger_key(portal), ledger.to_text().as_bytes());
+                        store_put(&ledger_key(portal), &ledger.to_text());
                         // Daily, so a rollover while the widget is off is still caught.
                         if let Link::Modbus(_, poller) = &s.link {
                             let text = poller.yield_counters.to_text();
-                            kv::set(&yield_counters_key(portal), text.as_bytes());
+                            store_put(&yield_counters_key(portal), &text);
                         }
                     }
                     Some(ledger.totals(lifetime))
