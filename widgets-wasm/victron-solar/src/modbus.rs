@@ -131,7 +131,9 @@ fn parse_pdu(pdu: &[u8]) -> Option<Result<Vec<u16>, u8>> {
 pub struct YieldCounters {
     /// unit → (last raw value, rollovers seen)
     units: BTreeMap<u8, (u16, u32)>,
-    /// A rollover happened since the caller last saved.
+    /// Worth saving since the caller last did: a charger seen for the first
+    /// time, a rollover or reset, or another 10 kWh. The saved value then
+    /// stays close enough to catch a rollover while the widget isn't running.
     pub dirty: bool,
 }
 
@@ -144,11 +146,16 @@ const ROLLOVER_WINDOW: u32 = 6553;
 impl YieldCounters {
     /// Lifetime yield of `unit` in kWh.
     pub fn lifetime_kwh(&mut self, unit: u8, raw: u16) -> f64 {
-        let (last, mut wraps) = *self.units.entry(unit).or_insert((raw, 0));
+        let (last, mut wraps) = self.units.get(&unit).copied().unwrap_or_else(|| {
+            self.dirty = true;
+            (raw, 0)
+        });
+        if raw / 100 != last / 100 {
+            self.dirty = true;
+        }
         if raw < last {
             if 65536 - u32::from(last) + u32::from(raw) < ROLLOVER_WINDOW {
                 wraps += 1;
-                self.dirty = true;
             } else {
                 wraps = 0;
             }
@@ -242,12 +249,17 @@ pub struct Step {
     pub changed: bool,
 }
 
+/// Requests kept in flight at once. Replies reach the widget in host ticks
+/// (~70 ms apart on the Deck), so one at a time made the 494-request unit
+/// scan take over 30 s; Venus OS answers pipelined requests in order.
+const WINDOW: usize = 32;
+
 /// Drives one connection: serial number, then the unit scan, then a round
 /// of reads each time [`Poller::request_round`] asks for one.
 #[derive(Default)]
 pub struct Poller {
     next_tid: u16,
-    in_flight: Option<(u16, Query)>,
+    in_flight: BTreeMap<u16, Query>,
     queue: VecDeque<Query>,
     phase: Phase,
     portal: Option<String>,
@@ -266,7 +278,7 @@ impl Poller {
         self.advance(&mut Readings::default()).0
     }
 
-    /// Ask for a fresh round of reads. Returns the request to send if the
+    /// Ask for a fresh round of reads. Returns the requests to send if the
     /// connection was idle; a round still running is left to finish.
     pub fn request_round(&mut self, readings: &mut Readings) -> Option<Vec<u8>> {
         self.round_wanted = true;
@@ -275,14 +287,11 @@ impl Poller {
 
     pub fn on_response(&mut self, response: Response, readings: &mut Readings) -> Step {
         let mut step = Step::default();
-        match self.in_flight {
-            Some((tid, query)) if tid == response.tid => {
-                self.in_flight = None;
-                (step.changed, step.event) = self.apply(query, response.result, readings);
-            }
-            // A reply to a request from before a reconnect: not ours.
-            _ => return step,
-        }
+        // No match: a reply to a request from before a reconnect, not ours.
+        let Some(query) = self.in_flight.remove(&response.tid) else {
+            return step;
+        };
+        (step.changed, step.event) = self.apply(query, response.result, readings);
         let (send, finished) = self.advance(readings);
         step.send = send;
         match finished {
@@ -298,31 +307,28 @@ impl Poller {
         step
     }
 
-    /// Send the next queued query if none is in flight, queuing the next
-    /// batch when this one ran out. Also returns the batch that just
-    /// finished, if one did.
+    /// Fill the window with queued queries, queuing the next batch once
+    /// this one has run out and all its replies are in. Also returns the
+    /// batch that just finished, if one did.
     fn advance(&mut self, readings: &mut Readings) -> (Option<Vec<u8>>, Phase) {
-        if self.in_flight.is_some() {
-            return (None, Phase::Idle);
-        }
         let mut finished = Phase::Idle;
-        if self.queue.is_empty() {
+        if self.queue.is_empty() && self.in_flight.is_empty() {
             finished = core::mem::take(&mut self.phase);
             if finished == Phase::Poll {
                 readings.complete = true;
             }
             self.phase = self.refill();
         }
-        let Some(query) = self.queue.pop_front() else {
-            return (None, finished);
-        };
-        self.next_tid = self.next_tid.wrapping_add(1);
-        self.in_flight = Some((self.next_tid, query));
-        let (unit, reg, count) = query.target();
-        (
-            Some(read_request(self.next_tid, unit, reg, count)),
-            finished,
-        )
+        let mut out = Vec::new();
+        while self.in_flight.len() < WINDOW
+            && let Some(query) = self.queue.pop_front()
+        {
+            self.next_tid = self.next_tid.wrapping_add(1);
+            self.in_flight.insert(self.next_tid, query);
+            let (unit, reg, count) = query.target();
+            out.extend(read_request(self.next_tid, unit, reg, count));
+        }
+        ((!out.is_empty()).then_some(out), finished)
     }
 
     fn refill(&mut self) -> Phase {
@@ -517,15 +523,20 @@ mod tests {
     fn yield_counter_rolls_over_but_a_reset_starts_again() {
         let mut c = YieldCounters::default();
         assert!((c.lifetime_kwh(224, 65_000) - 6500.0).abs() < 1e-9);
-        assert!(!c.dirty);
-        // 65000 → 300 is 83.6 kWh forward across the top: a rollover.
+        assert!(c.dirty, "a new charger is saved");
+        c.dirty = false;
+        c.lifetime_kwh(224, 65_090);
+        assert!(!c.dirty, "less than 10 kWh on isn't");
+        // 65090 → 300 is 74.6 kWh forward across the top: a rollover.
         assert!((c.lifetime_kwh(224, 300) - 6583.6).abs() < 1e-9);
         assert!(c.dirty);
+        c.dirty = false;
+        c.lifetime_kwh(224, 400);
+        assert!(c.dirty, "another 10 kWh is");
         // 30000 → 10 would be ~3550 kWh forward: someone reset it.
         let mut c = YieldCounters::default();
         c.lifetime_kwh(1, 30_000);
         assert!((c.lifetime_kwh(1, 10) - 1.0).abs() < 1e-9);
-        assert!(!c.dirty);
     }
 
     #[test]
@@ -556,22 +567,38 @@ mod tests {
         }
     }
 
-    /// Answer requests until the poller goes quiet; returns the events.
-    fn run(poller: &mut Poller, first: Option<Vec<u8>>, readings: &mut Readings) -> Vec<Event> {
+    /// The requests in what the poller sent.
+    fn requests(bytes: &[u8]) -> Vec<(u16, u8, u16, u16)> {
+        bytes.chunks(12).map(parse_request).collect()
+    }
+
+    /// Answer requests in order until the poller goes quiet, checking it
+    /// never has more than [`WINDOW`] out; returns the events and the units
+    /// asked.
+    fn run_with(
+        poller: &mut Poller,
+        first: Option<Vec<u8>>,
+        readings: &mut Readings,
+        answer: impl Fn(u8, u16, u16) -> Vec<u8>,
+    ) -> (Vec<Event>, Vec<u8>) {
         let mut events = Vec::new();
-        let mut next = first;
-        let mut requests = 0;
-        while let Some(req) = next {
-            requests += 1;
-            assert!(requests < 1000, "runaway");
-            let (tid, unit, reg, _) = parse_request(&req);
+        let mut units = Vec::new();
+        let mut out: VecDeque<_> = first.map(|b| requests(&b)).unwrap_or_default().into();
+        while let Some((tid, unit, reg, _)) = out.pop_front() {
+            units.push(unit);
+            assert!(units.len() < 2000, "runaway");
             let mut d = Decoder::default();
-            d.push(&device(unit, reg, tid));
+            d.push(&answer(unit, reg, tid));
             let step = poller.on_response(d.next_response().unwrap(), readings);
             events.extend(step.event);
-            next = step.send;
+            out.extend(step.send.map(|b| requests(&b)).unwrap_or_default());
+            assert!(out.len() <= WINDOW);
         }
-        events
+        (events, units)
+    }
+
+    fn run(poller: &mut Poller, first: Option<Vec<u8>>, readings: &mut Readings) -> Vec<Event> {
+        run_with(poller, first, readings, device).0
     }
 
     #[test]
@@ -596,18 +623,24 @@ mod tests {
         assert!((r.lifetime_kwh().unwrap() - 4890.0).abs() < 1e-9);
         assert_eq!(r.daily_history_kwh(), vec![1.4, 1.1]);
 
-        // The next round skips serial and scan: just the five reads.
+        // The next round skips serial and scan: just the six reads, sent
+        // together.
         let round = p.request_round(&mut r);
-        let mut units = Vec::new();
-        let mut next = round;
-        while let Some(req) = next {
-            let (tid, unit, reg, _) = parse_request(&req);
-            units.push(unit);
-            let mut d = Decoder::default();
-            d.push(&device(unit, reg, tid));
-            next = p.on_response(d.next_response().unwrap(), &mut r).send;
-        }
+        assert_eq!(round.as_ref().map(|b| requests(b).len()), Some(6));
+        let (_, units) = run_with(&mut p, round, &mut r, device);
         assert_eq!(units, [100, 100, 224, 20, 20, 20]);
+    }
+
+    #[test]
+    fn the_scan_is_pipelined() {
+        let mut p = Poller::default();
+        let mut r = Readings::default();
+        let serial = p.start().unwrap();
+        let (tid, unit, reg, _) = parse_request(&serial);
+        let mut d = Decoder::default();
+        d.push(&device(unit, reg, tid));
+        let scan = p.on_response(d.next_response().unwrap(), &mut r).send;
+        assert_eq!(scan.map(|b| requests(&b).len()), Some(WINDOW));
     }
 
     #[test]
@@ -629,18 +662,14 @@ mod tests {
         let mut r = Readings::default();
         let first = p.start();
         run(&mut p, first, &mut r);
-        let mut next = p.request_round(&mut r);
-        while let Some(req) = next {
-            let (tid, unit, reg, _) = parse_request(&req);
-            let answer = if unit == 224 {
+        let round = p.request_round(&mut r);
+        run_with(&mut p, round, &mut r, |unit, reg, tid| {
+            if unit == 224 {
                 exception(tid, unit, 11)
             } else {
                 device(unit, reg, tid)
-            };
-            let mut d = Decoder::default();
-            d.push(&answer);
-            next = p.on_response(d.next_response().unwrap(), &mut r).send;
-        }
+            }
+        });
         assert!((r.lifetime_kwh().unwrap() - 6.0).abs() < 1e-9);
         assert!(r.daily_history_kwh().is_empty());
     }
