@@ -124,22 +124,27 @@ mod tests {
     #[test]
     fn an_unsafe_entity_id_anywhere_rejects_the_whole_template() {
         assert!(
-            build_template("sensor.pv'); {}", "sensor.today", "sensor.month", "sensor.year")
-                .is_none()
+            build_template(
+                "sensor.pv'); {}",
+                "sensor.today",
+                "sensor.month",
+                "sensor.year"
+            )
+            .is_none()
         );
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_glue {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
+    use bmc_wasm_sdk::types::Availability;
     #[expect(
         clippy::wildcard_imports,
         reason = "widget render code uses many SDK exports and macros in one file"
     )]
     use bmc_wasm_sdk::*;
-    use bmc_wasm_sdk::types::Availability;
 
     use super::build_template;
     use super::manifest_params;
@@ -165,7 +170,7 @@ mod wasm_glue {
 
     thread_local! {
         static DATA: RefCell<SolarData> = RefCell::new(SolarData::default());
-        static POLL: Cell<Option<PollHandle>> = const { Cell::new(None) };
+        static POLL: RefCell<Option<PollHandle>> = const { RefCell::new(None) };
     }
 
     // ---------------------------------------------------------------------
@@ -187,12 +192,14 @@ mod wasm_glue {
     /// otherwise it stays dormant and the widget renders its placeholder
     /// state without ever spending a request.
     fn reconcile() {
-        if let Some(handle) = POLL.with(Cell::get) {
-            handle.set_enabled(ha_bound());
-        }
+        POLL.with_borrow(|poll| {
+            if let Some(handle) = poll {
+                handle.set_enabled(ha_bound());
+            }
+        });
     }
 
-    fn build_request(_handle: PollHandle) -> Option<FetchSpec> {
+    fn build_request(_handle: &PollHandle) -> Option<FetchSpec> {
         let params = manifest_params::Params::current();
         let template = build_template(
             &params.entity_power,
@@ -222,7 +229,7 @@ mod wasm_glue {
         }
     }
 
-    fn on_reply(handle: PollHandle, response: &FetchResponse) {
+    fn on_reply(handle: &PollHandle, response: &FetchResponse) {
         if !response.ok() {
             log_debug!("victron-solar: fetch failed (status {})", response.status);
             DATA.with(|d| {
@@ -267,16 +274,18 @@ mod wasm_glue {
                 ..Default::default()
             },
         );
-        POLL.with(|p| p.set(Some(handle)));
+        POLL.set(Some(handle));
         reconcile();
         request_frame();
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn on_params_update() {
-        if let Some(handle) = POLL.with(Cell::get) {
-            handle.invalidate();
-        }
+        POLL.with_borrow(|poll| {
+            if let Some(handle) = poll {
+                handle.invalidate();
+            }
+        });
         request_frame();
     }
 
@@ -285,9 +294,11 @@ mod wasm_glue {
         // A rebind may point at a different HA instance: blank and refetch.
         DATA.with(|d| *d.borrow_mut() = SolarData::default());
         reconcile();
-        if let Some(handle) = POLL.with(Cell::get) {
-            handle.invalidate();
-        }
+        POLL.with_borrow(|poll| {
+            if let Some(handle) = poll {
+                handle.invalidate();
+            }
+        });
         request_frame();
     }
 
@@ -396,7 +407,10 @@ mod wasm_glue {
         row(
             props!(cross_align: CrossAlign::Center),
             [
-                text(label, style!(size: sp.label_font, color: GRAY_50, flex: 1.0)),
+                text(
+                    label,
+                    style!(size: sp.label_font, color: GRAY_50, flex: 1.0),
+                ),
                 text(
                     kwh_str(value),
                     style!(size: sp.value_font, weight: FontWeight::BOLD, color: WHITE, align: TextAlign::Right),
@@ -452,7 +466,10 @@ mod wasm_glue {
                     power_str(data),
                     style!(size: sp.power_font, weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
                 ),
-                col(props!(gap: sp.gap, flex: 1.0, justify_content: Justify::End), stats(sp, data)),
+                col(
+                    props!(gap: sp.gap, flex: 1.0, justify_content: Justify::End),
+                    stats(sp, data),
+                ),
             ],
         )
     }
