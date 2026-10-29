@@ -1,0 +1,61 @@
+From 398d84e3c8f46d5209cae62b0091e8bf2dc9cf17 Mon Sep 17 00:00:00 2001
+From: Christian Gmeiner <cgmeiner@igalia.com>
+Date: Sat, 15 Aug 2026 13:28:22 +0200
+Subject: [PATCH] etnaviv: drm: Do not return a stale fence fd
+
+etna_cmd_stream_flush(..) copied req.fence_fd to the caller
+unconditionally. A flush with frontend noop enabled skips the submit
+ioctl even when an out-fence is requested, and a failed submit produces
+no fence. In both cases req.fence_fd was never written by the kernel,
+so the caller received a stale value, either 0 or a copy of the
+in-fence fd, which the fence code later closes. Initialize the
+returned fd to -1 and take req.fence_fd only after a successful
+submit.
+
+Cc: mesa-stable
+Signed-off-by: Christian Gmeiner <cgmeiner@igalia.com>
+Reviewed-by: Lucas Stach <l.stach@pengutronix.de>
+Part-of: <https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/43788>
+---
+ src/etnaviv/drm/etnaviv_cmd_stream.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/etnaviv/drm/etnaviv_cmd_stream.c b/src/etnaviv/drm/etnaviv_cmd_stream.c
+index ec897d0fa8c0..cedbf4298140 100644
+--- a/src/etnaviv/drm/etnaviv_cmd_stream.c
++++ b/src/etnaviv/drm/etnaviv_cmd_stream.c
+@@ -205,6 +205,7 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ {
+ 	struct etna_cmd_stream_priv *priv = etna_cmd_stream_priv(stream);
+ 	struct etna_gpu *gpu = priv->pipe->gpu;
++	int fence_fd = -1;
+ 
+ 	struct drm_etnaviv_gem_submit req = {
+ 		.pipe = gpu->core,
+@@ -240,10 +241,12 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ 		ret = drmCommandWriteRead(gpu->dev->fd, DRM_ETNAVIV_GEM_SUBMIT,
+ 				&req, sizeof(req));
+ 
+-		if (ret)
++		if (ret) {
+ 			ERROR_MSG("submit failed: %d (%s)", ret, strerror(errno));
+-		else
++		} else {
+ 			priv->last_timestamp = req.fence;
++			fence_fd = req.fence_fd;
++		}
+ 	}
+ 
+ 	for (uint32_t i = 0; i < priv->nr_bos; i++)
+@@ -252,7 +255,7 @@ void etna_cmd_stream_flush(struct etna_cmd_stream *stream, int in_fence_fd,
+ 	_mesa_hash_table_clear(priv->bo_table, NULL);
+ 
+ 	if (out_fence_fd)
+-		*out_fence_fd = req.fence_fd;
++		*out_fence_fd = fence_fd;
+ 
+ 	stream->offset = 0;
+ 	priv->submit.nr_bos = 0;
+-- 
+GitLab
+
