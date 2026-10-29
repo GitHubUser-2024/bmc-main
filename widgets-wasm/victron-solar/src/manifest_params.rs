@@ -10,22 +10,16 @@ use bmc_wasm_sdk::params as snapshot;
 use bmc_wasm_sdk::params::typed::ParamRead;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
-    pub entity_month: String,
-    pub entity_power: String,
-    pub entity_today: String,
-    pub entity_year: String,
-    pub ha_url: String,
+    pub gx_host: String,
+    pub gx_port: i32,
 }
 impl Params {
     /// Materialise a typed snapshot from a dynamic [`snapshot::Params`].
     #[must_use]
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
-            entity_month: <String as ParamRead>::read_required(snap, "entity_month"),
-            entity_power: <String as ParamRead>::read_required(snap, "entity_power"),
-            entity_today: <String as ParamRead>::read_required(snap, "entity_today"),
-            entity_year: <String as ParamRead>::read_required(snap, "entity_year"),
-            ha_url: <String as ParamRead>::read_required(snap, "ha_url"),
+            gx_host: <String as ParamRead>::read_required(snap, "gx_host"),
+            gx_port: <i32 as ParamRead>::read_required(snap, "gx_port"),
         }
     }
     /// Latest typed snapshot delivered for this widget instance.
@@ -71,31 +65,12 @@ impl Params {
     #[must_use]
     pub fn changed_keys(&self, other: &Self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.entity_month != other.entity_month {
-            out.push("entity_month");
+        if self.gx_host != other.gx_host {
+            out.push("gx_host");
         }
-        if self.entity_power != other.entity_power {
-            out.push("entity_power");
-        }
-        if self.entity_today != other.entity_today {
-            out.push("entity_today");
-        }
-        if self.entity_year != other.entity_year {
-            out.push("entity_year");
-        }
-        if self.ha_url != other.ha_url {
-            out.push("ha_url");
+        if self.gx_port != other.gx_port {
+            out.push("gx_port");
         }
         out
-    }
-}
-/// Credential slots this widget declares, one module per slot.
-pub mod credentials {
-    ///Home Assistant — a `generic-token` account. Required — the widget cannot work until an account is bound.
-    ///
-    ///Long-lived access token for your Home Assistant instance
-    pub mod ha {
-        ///Placeholder for this slot's `token` field.
-        pub const TOKEN: &str = "{{ credential.ha.token }}";
     }
 }

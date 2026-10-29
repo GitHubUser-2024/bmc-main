@@ -5,140 +5,26 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Victron Solar widget — live PV power and Home-Assistant-reported solar
-//! yield (today, this month, this year) for a Victron Energy system.
+//! Victron Solar widget — live PV power and solar yield (today, this month,
+//! this year) read straight from a Victron GX device.
 //!
-//! Everything is fetched in one request: Home Assistant's `/api/template`
-//! endpoint evaluates a small Jinja template that reads the configured
-//! entities and answers with exactly the JSON object this widget wants,
-//! rather than pulling the full `/api/states` list.
+//! Every GX (Cerbo, Ekrano, Venus GX, Venus OS on a Pi) runs an MQTT broker;
+//! the widget holds one TLS connection to it (the GX's certificate is
+//! self-signed), finds the portal id, subscribes to the solar topics and
+//! sends the keepalive that makes Venus OS publish them. See [`venus`] for
+//! the topics, [`totals`] for how month/year are counted.
 
 mod manifest_params;
-
-/// A Home Assistant entity_id is `domain.object_id` — lowercase ascii,
-/// digits, underscores, and exactly the dots that separate domain from
-/// object. Rejecting anything else keeps a stray quote (or brace) in a
-/// param from breaking out of the single-quoted Jinja string literal it is
-/// spliced into by [`build_template`].
-fn entity_id_safe(id: &str) -> bool {
-    !id.is_empty()
-        && id.contains('.')
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'_')
-}
-
-/// Builds the Jinja template that HA's `/api/template` endpoint evaluates
-/// to return exactly the six values this widget needs, as a flat JSON
-/// object of strings — one request instead of six. `month` and `year` are
-/// each read twice: once for their current-cycle total, once for their
-/// `last_period` attribute (the previous, already-completed cycle).
-///
-/// The opening `{{{{` (not `{{`) is deliberate: the host's credential
-/// substitution pass (`bmc_wasm_runtime::runtime::imports::credentials::
-/// substitute`) scans every fetch's headers *and body* for `{{ … }}` and
-/// refuses the whole request unless each one resolves as a
-/// `credential.<slot>.<field>` reference — the same escaping rule as
-/// Rust's own format strings (`{{{{` → literal `{{`). Since this body is
-/// itself Jinja (HA's template syntax, unrelated to that host mechanism),
-/// its opening brace must be escaped so the host's scanner doesn't try to
-/// resolve it as a credential and reject the request outright. Only the
-/// opening needs escaping — the host only ever looks for `{{`, never `}}`
-/// on its own, so the single closing `}}` below is correct as-is.
-///
-/// `None` when any entity id looks unsafe to splice into a single-quoted
-/// Jinja string literal; the caller skips the fetch for that tick rather
-/// than sending a malformed or unsafe template.
-fn build_template(power: &str, today: &str, month: &str, year: &str) -> Option<String> {
-    for id in [power, today, month, year] {
-        if !entity_id_safe(id) {
-            return None;
-        }
-    }
-    let mut t = String::with_capacity(224);
-    t.push_str("{{{{ {'pv_power': states('");
-    t.push_str(power);
-    t.push_str("'), 'today_kwh': states('");
-    t.push_str(today);
-    t.push_str("'), 'month_kwh': states('");
-    t.push_str(month);
-    t.push_str("'), 'last_month_kwh': state_attr('");
-    t.push_str(month);
-    t.push_str("','last_period'), 'year_kwh': states('");
-    t.push_str(year);
-    t.push_str("'), 'last_year_kwh': state_attr('");
-    t.push_str(year);
-    t.push_str("','last_period')} | tojson }}");
-    Some(t)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{build_template, entity_id_safe};
-
-    #[test]
-    fn real_entity_ids_pass() {
-        assert!(entity_id_safe("sensor.solar_yield_today"));
-        assert!(entity_id_safe("sensor.victronsolarcharger_yield_pv224"));
-    }
-
-    #[test]
-    fn ids_without_a_domain_separator_or_with_stray_characters_are_rejected() {
-        assert!(!entity_id_safe(""));
-        assert!(!entity_id_safe("no_dot_here"));
-        assert!(!entity_id_safe("sensor.foo'; {{ malicious"));
-        assert!(!entity_id_safe("sensor.foo bar"));
-        assert!(!entity_id_safe("sensor.FooBar"));
-    }
-
-    #[test]
-    fn template_reuses_the_month_and_year_entity_for_their_last_period_attribute() {
-        let t = build_template("sensor.pv", "sensor.today", "sensor.month", "sensor.year")
-            .expect("all four ids are safe");
-        assert!(t.contains("states('sensor.pv')"));
-        assert!(t.contains("states('sensor.today')"));
-        assert!(t.contains("states('sensor.month')"));
-        assert!(t.contains("state_attr('sensor.month','last_period')"));
-        assert!(t.contains("states('sensor.year')"));
-        assert!(t.contains("state_attr('sensor.year','last_period')"));
-        assert!(t.starts_with("{{{{ "));
-        assert!(t.ends_with(" }}"));
-    }
-
-    /// The host's credential-substitution pass unescapes `{{{{` to a
-    /// literal `{{` (Rust format-string rules) and leaves everything else
-    /// alone. Simulate that pass here so a regression that breaks the
-    /// escaping — e.g. someone "cleaning up" the doubled brace — fails a
-    /// fast host test instead of only surfacing as a live fetch refusal.
-    #[test]
-    fn template_survives_the_hosts_escape_unescape_round_trip() {
-        let t = build_template("sensor.pv", "sensor.today", "sensor.month", "sensor.year")
-            .expect("all four ids are safe");
-        let unescaped = t.replacen("{{{{", "{{", 1);
-        assert!(unescaped.starts_with("{{ "));
-        assert!(!unescaped.starts_with("{{{{"));
-        assert!(unescaped.contains("states('sensor.pv')"));
-        assert!(unescaped.ends_with(" }}"));
-    }
-
-    #[test]
-    fn an_unsafe_entity_id_anywhere_rejects_the_whole_template() {
-        assert!(
-            build_template(
-                "sensor.pv'); {}",
-                "sensor.today",
-                "sensor.month",
-                "sensor.year"
-            )
-            .is_none()
-        );
-    }
-}
+mod mqtt;
+mod totals;
+mod venus;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_glue {
     use std::cell::RefCell;
 
+    use bmc_wasm_sdk::socket::{Socket, SocketEvent, tls_connect_insecure};
+    use bmc_wasm_sdk::timer::{self, Timer};
     use bmc_wasm_sdk::types::Availability;
     #[expect(
         clippy::wildcard_imports,
@@ -146,11 +32,22 @@ mod wasm_glue {
     )]
     use bmc_wasm_sdk::*;
 
-    use super::build_template;
     use super::manifest_params;
-    use super::manifest_params::credentials as slots;
+    use super::mqtt::{self, Decoder, Incoming};
+    use super::totals::{Date, Ledger, Totals};
+    use super::venus::{self, Readings};
 
-    const REFRESH_MS: u32 = 15_000;
+    /// Ping + keepalive cadence. Venus OS stops publishing ~60 s after the
+    /// last keepalive, and the MQTT session itself expires after
+    /// [`mqtt::KEEPALIVE_SECS`].
+    const TICK_MS: u32 = 25_000;
+    /// No packet at all for this long: the connection is dead, reconnect.
+    const STALE_SECS: i64 = 90;
+    /// Sent on every keepalive after the first: refreshes the subscription
+    /// without making the GX republish every value (older Venus OS ignores
+    /// the option and republishes, which is merely heavier).
+    const KEEPALIVE_QUIET: &[u8] = br#"{"keepalive-options": ["suppress-republish"]}"#;
+
     const NOT_AVAILABLE: &str = "--";
     const BG_COLOR: Color = BLACK;
     const HEADER_COLOR: Color = GRAY_60;
@@ -158,148 +55,263 @@ mod wasm_glue {
 
     const SUN_ICON: Svg = include_svg!("assets/sun.svg");
 
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, PartialEq)]
+    enum Status {
+        Connecting,
+        Live,
+        Unreachable,
+        Refused(u8),
+    }
+
+    #[derive(Clone, Copy)]
     struct SolarData {
+        status: Status,
         pv_power_w: Availability<f64>,
         today_kwh: Availability<f64>,
         month_kwh: Availability<f64>,
+        month_since: Option<Date>,
         last_month_kwh: Availability<f64>,
         year_kwh: Availability<f64>,
+        year_since: Option<Date>,
         last_year_kwh: Availability<f64>,
+    }
+
+    impl Default for SolarData {
+        fn default() -> Self {
+            Self {
+                status: Status::Connecting,
+                pv_power_w: Availability::default(),
+                today_kwh: Availability::default(),
+                month_kwh: Availability::default(),
+                month_since: None,
+                last_month_kwh: Availability::default(),
+                year_kwh: Availability::default(),
+                year_since: None,
+                last_year_kwh: Availability::default(),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Session {
+        decoder: Decoder,
+        portal: Option<String>,
+        readings: Readings,
+        ledger: Option<Ledger>,
+        last_rx_secs: i64,
+        status: Option<Status>,
     }
 
     thread_local! {
         static DATA: RefCell<SolarData> = RefCell::new(SolarData::default());
-        static POLL: RefCell<Option<PollHandle>> = const { RefCell::new(None) };
+        static SESSION: RefCell<Session> = RefCell::new(Session::default());
+        static SOCKET: RefCell<Option<Socket>> = const { RefCell::new(None) };
+        static TICK: RefCell<Option<Timer>> = const { RefCell::new(None) };
     }
 
     // ---------------------------------------------------------------------
-    // Fetching
+    // GX connection
     // ---------------------------------------------------------------------
 
-    fn ha_bound() -> bool {
-        credentials::current().is_bound("ha")
+    fn now_secs() -> i64 {
+        SystemTime::now().unix_secs
     }
 
-    fn auth_header() -> String {
-        fmt!(
-            "Authorization: Bearer {}\nContent-Type: application/json",
-            slots::ha::TOKEN
+    /// Local date and hour, in the Deck's configured timezone.
+    fn local_now() -> (Date, u32) {
+        let now = SystemTime::now();
+        let local = SystemTime {
+            unix_secs: format::local_unix_secs_or_system(&now, None),
+        }
+        .utc();
+        (
+            Date::new(
+                i32::from(local.year),
+                u32::from(local.month),
+                u32::from(local.day),
+            ),
+            u32::from(local.hour),
         )
     }
 
-    /// Enable the poll only once an account is bound to the `ha` slot;
-    /// otherwise it stays dormant and the widget renders its placeholder
-    /// state without ever spending a request.
-    fn reconcile() {
-        POLL.with_borrow(|poll| {
-            if let Some(handle) = poll {
-                handle.set_enabled(ha_bound());
+    fn ledger_key(portal: &str) -> String {
+        fmt!("ledger-{}", portal)
+    }
+
+    fn connect() {
+        let params = manifest_params::Params::current();
+        let host = params.gx_host.trim().to_string();
+        let port = u16::try_from(params.gx_port).unwrap_or(8883);
+        SESSION.with_borrow_mut(|s| {
+            let ledger = s.ledger.take();
+            *s = Session {
+                last_rx_secs: now_secs(),
+                ..Session::default()
+            };
+            s.ledger = ledger;
+        });
+        set_status(Status::Connecting);
+        if host.is_empty() {
+            SOCKET.set(None);
+            set_status(Status::Unreachable);
+            return;
+        }
+        SOCKET.set(tls_connect_insecure(&host, port, on_socket_event));
+        if SOCKET.with_borrow(Option::is_none) {
+            set_status(Status::Unreachable);
+        }
+    }
+
+    fn set_status(status: Status) {
+        DATA.with_borrow_mut(|d| d.status = status);
+        request_frame();
+    }
+
+    fn on_socket_event(socket: &Socket, event: &SocketEvent<'_>) {
+        match event {
+            SocketEvent::Connected => {
+                socket.write(&mqtt::connect(&fmt!("bmc-victron-solar-{}", now_secs())));
+            }
+            SocketEvent::Data(bytes) => on_data(socket, bytes),
+            SocketEvent::Closed(code) => {
+                log_info!("victron-solar: GX connection closed ({})", code);
+                SOCKET.set(None);
+                // A refusal is the more useful thing to show than the close that follows it.
+                if !matches!(DATA.with_borrow(|d| d.status), Status::Refused(_)) {
+                    set_status(Status::Unreachable);
+                }
+            }
+        }
+    }
+
+    fn on_data(socket: &Socket, bytes: &[u8]) {
+        let mut changed = false;
+        SESSION.with_borrow_mut(|s| {
+            s.last_rx_secs = now_secs();
+            s.decoder.push(bytes);
+            while let Some(packet) = s.decoder.next_packet() {
+                match packet {
+                    Incoming::ConnAck(0) => {
+                        socket.write(&mqtt::subscribe(1, &[venus::DISCOVERY_FILTER]));
+                    }
+                    Incoming::ConnAck(code) => {
+                        log_warn!(
+                            "victron-solar: GX refused the MQTT connection (code {})",
+                            code
+                        );
+                        s.status = Some(Status::Refused(code));
+                    }
+                    Incoming::Publish { topic, payload } => match s.portal.clone() {
+                        Some(portal) => changed |= s.readings.apply(&portal, &topic, &payload),
+                        None => {
+                            if let Some(portal) = venus::portal_from_serial_topic(&topic) {
+                                let filters = venus::subscriptions(portal);
+                                let filters: Vec<&str> =
+                                    filters.iter().map(String::as_str).collect();
+                                socket.write(&mqtt::subscribe(2, &filters));
+                                socket.write(&mqtt::publish(&fmt!("R/{}/keepalive", portal), b""));
+                                s.ledger = kv::get_string(&ledger_key(portal))
+                                    .and_then(|t| Ledger::from_text(&t));
+                                s.portal = Some(portal.to_string());
+                                s.status = Some(Status::Live);
+                            }
+                        }
+                    },
+                    Incoming::Other => {}
+                }
             }
         });
-    }
-
-    fn build_request(_handle: &PollHandle) -> Option<FetchSpec> {
-        let params = manifest_params::Params::current();
-        let template = build_template(
-            &params.entity_power,
-            &params.entity_today,
-            &params.entity_month,
-            &params.entity_year,
-        )?;
-        let body = json!({"template": #s(&template)});
-        let url = fmt!("{}/api/template", params.ha_url.trim_end_matches('/'));
-        Some(FetchSpec::post(url).headers(auth_header()).body(body))
-    }
-
-    fn parse_field(doc: &JsonDoc, path: &str) -> Availability<f64> {
-        doc.str(path).and_then(|s| s.parse::<f64>().ok()).into()
-    }
-
-    /// A fresh value replaces whatever was there; a missing or unparsable
-    /// one (HA's `unknown`/`unavailable`, or a bad path) marks that single
-    /// field failed without touching a value it already has, and without
-    /// touching any of the other five fields in this same reply.
-    fn merge_field(field: &mut Availability<f64>, new: Availability<f64>) {
-        match new {
-            Availability::Available(v) => *field = Availability::Available(v),
-            Availability::Unavailable | Availability::Failed => {
-                field.mark_failed();
-            }
+        if let Some(status) = SESSION.with_borrow_mut(|s| s.status.take()) {
+            set_status(status);
+        }
+        if changed {
+            recompute();
         }
     }
 
-    fn on_reply(handle: &PollHandle, response: &FetchResponse) {
-        if !response.ok() {
-            log_debug!("victron-solar: fetch failed (status {})", response.status);
-            DATA.with(|d| {
-                let mut d = d.borrow_mut();
-                d.pv_power_w.mark_failed();
-                d.today_kwh.mark_failed();
-                d.month_kwh.mark_failed();
-                d.last_month_kwh.mark_failed();
-                d.year_kwh.mark_failed();
-                d.last_year_kwh.mark_failed();
-            });
-            request_frame();
-            return;
-        }
-        let json = response.json();
-        if !json.is_valid() {
-            log_warn!("victron-solar: response was not valid JSON");
-            handle.retry();
-            request_frame();
-            return;
-        }
-        DATA.with(|d| {
-            let mut d = d.borrow_mut();
-            merge_field(&mut d.pv_power_w, parse_field(&json, "/pv_power"));
-            merge_field(&mut d.today_kwh, parse_field(&json, "/today_kwh"));
-            merge_field(&mut d.month_kwh, parse_field(&json, "/month_kwh"));
-            merge_field(&mut d.last_month_kwh, parse_field(&json, "/last_month_kwh"));
-            merge_field(&mut d.year_kwh, parse_field(&json, "/year_kwh"));
-            merge_field(&mut d.last_year_kwh, parse_field(&json, "/last_year_kwh"));
+    /// Re-derive what's on screen from the readings, rolling the ledger
+    /// over (and persisting it) when the day changed.
+    fn recompute() {
+        let (today, hour) = local_now();
+        let (power, totals) = SESSION.with_borrow_mut(|s| {
+            let power = s.readings.pv_power_w();
+            let lifetime = s.readings.lifetime_kwh();
+            let totals = match (s.readings.complete, lifetime, s.portal.as_deref()) {
+                (true, Some(lifetime), Some(portal)) => {
+                    let daily = s.readings.daily_history_kwh();
+                    let changed = if let Some(ledger) = s.ledger.as_mut() {
+                        ledger.observe(today, hour, lifetime, &daily)
+                    } else {
+                        s.ledger = Some(Ledger::seed(today, lifetime, &daily));
+                        true
+                    };
+                    let ledger = s.ledger.as_ref().expect("set above");
+                    if changed {
+                        kv::set(&ledger_key(portal), ledger.to_text().as_bytes());
+                    }
+                    Some(ledger.totals(lifetime))
+                }
+                _ => None,
+            };
+            (power, totals)
+        });
+        DATA.with_borrow_mut(|d| {
+            d.pv_power_w = power.into();
+            apply_totals(d, totals);
         });
         request_frame();
+    }
+
+    fn apply_totals(d: &mut SolarData, totals: Option<Totals>) {
+        let Some(t) = totals else {
+            return;
+        };
+        d.today_kwh = Availability::Available(t.today);
+        d.month_kwh = Availability::Available(t.month);
+        d.month_since = t.month_since;
+        d.last_month_kwh = t.last_month.into();
+        d.year_kwh = Availability::Available(t.year);
+        d.year_since = t.year_since;
+        d.last_year_kwh = t.last_year.into();
+    }
+
+    fn on_tick(_timer: &Timer, _periods: u32) {
+        let stale = SESSION.with_borrow(|s| now_secs() - s.last_rx_secs > STALE_SECS);
+        if SOCKET.with_borrow(Option::is_none) || stale {
+            if stale {
+                log_info!("victron-solar: no data from the GX, reconnecting");
+            }
+            connect();
+            return;
+        }
+        let portal = SESSION.with_borrow(|s| s.portal.clone());
+        SOCKET.with_borrow(|socket| {
+            if let Some(socket) = socket {
+                socket.write(&mqtt::pingreq());
+                if let Some(portal) = portal {
+                    socket.write(&mqtt::publish(
+                        &fmt!("R/{}/keepalive", portal),
+                        KEEPALIVE_QUIET,
+                    ));
+                }
+            }
+        });
+        // Rolls the day over even when the sun is down and nothing changes.
+        recompute();
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn init() {
-        let handle = register_poll(
-            build_request,
-            on_reply,
-            PollConfig {
-                interval_ms: Some(REFRESH_MS),
-                enabled: false,
-                ..Default::default()
-            },
-        );
-        POLL.set(Some(handle));
-        reconcile();
-        request_frame();
+        TICK.set(timer::start(TICK_MS, on_tick));
+        connect();
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn on_params_update() {
-        POLL.with_borrow(|poll| {
-            if let Some(handle) = poll {
-                handle.invalidate();
-            }
-        });
-        request_frame();
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn on_credentials_update() {
-        // A rebind may point at a different HA instance: blank and refetch.
-        DATA.with(|d| *d.borrow_mut() = SolarData::default());
-        reconcile();
-        POLL.with_borrow(|poll| {
-            if let Some(handle) = poll {
-                handle.invalidate();
-            }
-        });
-        request_frame();
+        // A different GX: its counters have nothing to do with the old one's.
+        DATA.set(SolarData::default());
+        SESSION.with_borrow_mut(|s| s.ledger = None);
+        connect();
     }
 
     // ---------------------------------------------------------------------
@@ -419,24 +431,39 @@ mod wasm_glue {
         )
     }
 
-    /// `sub`, when shown, is the previous completed cycle's total — e.g.
-    /// last month's yield printed under this month's running total.
+    /// `sub`, when shown, is the line under a running total: the previous
+    /// completed cycle's total (e.g. last month's yield), or, while the
+    /// running total doesn't cover the whole cycle yet, where it starts.
     fn stat_block(
         sp: &SizeParams,
         label: &str,
         value: Availability<f64>,
-        sub: Option<(&str, Availability<f64>)>,
+        sub: Option<String>,
     ) -> Node {
         let mut children = vec![stat_row(sp, label, value)];
         if sp.show_sub
-            && let Some((sub_label, sub_value)) = sub
+            && let Some(sub) = sub
         {
-            children.push(text(
-                fmt!("{} {}", sub_label, kwh_str(sub_value)),
-                style!(size: sp.sub_font, color: GRAY_50),
-            ));
+            children.push(text(sub, style!(size: sp.sub_font, color: GRAY_50)));
         }
         col(props!(gap: 2.0), children)
+    }
+
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    fn sub_line(since: Option<Date>, last_label: &str, last: Availability<f64>) -> String {
+        since.map_or_else(
+            || fmt!("{} {}", last_label, kwh_str(last)),
+            |d| {
+                fmt!(
+                    "Counting since {} {}",
+                    d.d,
+                    MONTHS[(d.m as usize).clamp(1, 12) - 1]
+                )
+            },
+        )
     }
 
     fn stats(sp: &SizeParams, data: &SolarData) -> Vec<Node> {
@@ -446,22 +473,44 @@ mod wasm_glue {
                 sp,
                 "This month",
                 data.month_kwh,
-                Some(("Last month:", data.last_month_kwh)),
+                Some(sub_line(
+                    data.month_since,
+                    "Last month:",
+                    data.last_month_kwh,
+                )),
             ),
             stat_block(
                 sp,
                 "This year",
                 data.year_kwh,
-                Some(("Last year:", data.last_year_kwh)),
+                Some(sub_line(data.year_since, "Last year:", data.last_year_kwh)),
             ),
         ]
     }
 
+    /// Shown under the header until live data flows.
+    fn status_line(data: &SolarData) -> Option<String> {
+        match data.status {
+            Status::Live => None,
+            Status::Connecting => Some("Connecting to GX…".to_string()),
+            Status::Unreachable => {
+                Some("GX not reachable — check address and MQTT on LAN".to_string())
+            }
+            Status::Refused(code) => Some(fmt!("GX refused MQTT (code {}) — password set?", code)),
+        }
+    }
+
+    fn status_node(sp: &SizeParams, data: &SolarData) -> Option<Node> {
+        status_line(data).map(|s| text(s, style!(size: sp.sub_font, color: ORANGE_50)))
+    }
+
     fn view_rect(sp: &SizeParams, data: &SolarData) -> Node {
+        let mut top = vec![header(sp.header_font, sp.icon_px)];
+        top.extend(status_node(sp, data));
         col(
             props!(background: BG_COLOR, padding: sp.padding, gap: sp.gap),
             [
-                header(sp.header_font, sp.icon_px),
+                col(props!(gap: 2.0), top),
                 text(
                     power_str(data),
                     style!(size: sp.power_font, weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
@@ -490,13 +539,14 @@ mod wasm_glue {
             gap: 8.0 * scale,
             show_sub: true,
         };
-        let mut children = vec![
-            header(sp.header_font, sp.icon_px),
+        let mut children = vec![header(sp.header_font, sp.icon_px)];
+        children.extend(status_node(&sp, data));
+        children.extend([
             text(
                 power_str(data),
                 style!(size: sp.power_font, weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
             ),
-        ];
+        ]);
         children.extend(stats(&sp, data));
         col(
             props!(background: BG_COLOR, padding: sp.padding, gap: sp.gap, cross_align: CrossAlign::Center),

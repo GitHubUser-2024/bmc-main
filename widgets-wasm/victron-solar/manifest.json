@@ -3,8 +3,8 @@
   "uid": "99e3fa96-a60b-4cf1-a5e9-4da61b216067",
   "version": "0.1.0",
   "name": "Solar (Victron)",
-  "subname": "Home Assistant",
-  "description": "Live PV power and solar yield (today, this month, this year) from a Victron system via Home Assistant",
+  "subname": "Victron GX",
+  "description": "Live PV power and solar yield (today, month, year) read directly from a Victron GX device (Cerbo, Ekrano, Venus GX) over MQTT. Enable MQTT on LAN (TLS 8883) on the GX.",
   "binary": "bin/victron-solar",
   "icon": "assets/icon.svg",
   "category": "utility",
@@ -28,44 +28,19 @@
     }
   ],
   "params": {
-    "ha_url": {
-      "name": "Home Assistant URL",
-      "description": "Base URL of your Home Assistant instance, e.g. http://homeassistant.local:8123",
+    "gx_host": {
+      "name": "GX address",
+      "description": "IP address or hostname of the Victron GX device, e.g. 192.168.1.50 or venus.local",
       "type": "string",
-      "format": "uri",
-      "default_value": "http://homeassistant.local:8123"
+      "default_value": "venus.local"
     },
-    "entity_power": {
-      "name": "PV power entity",
-      "description": "Home Assistant entity ID for current solar power, in watts",
-      "type": "string",
-      "default_value": "sensor.victronsolarcharger_yield_pv224"
-    },
-    "entity_today": {
-      "name": "Today's yield entity",
-      "description": "Home Assistant entity ID for today's solar yield, in kWh",
-      "type": "string",
-      "default_value": "sensor.solar_yield_today"
-    },
-    "entity_month": {
-      "name": "This month's yield entity",
-      "description": "Home Assistant entity ID for this month's solar yield, in kWh (its 'last_period' attribute supplies last month's total)",
-      "type": "string",
-      "default_value": "sensor.solar_yield_this_month"
-    },
-    "entity_year": {
-      "name": "This year's yield entity",
-      "description": "Home Assistant entity ID for this year's solar yield, in kWh (its 'last_period' attribute supplies last year's total)",
-      "type": "string",
-      "default_value": "sensor.solar_yield_this_year"
-    }
-  },
-  "credentials": {
-    "ha": {
-      "type": "generic-token",
-      "label": "Home Assistant",
-      "description": "Long-lived access token for your Home Assistant instance",
-      "required": true
+    "gx_port": {
+      "name": "MQTT TLS port",
+      "description": "The GX broker's TLS port; 8883 unless changed",
+      "type": "integer",
+      "min": 1,
+      "max": 65535,
+      "default_value": 8883
     }
   }
 }
