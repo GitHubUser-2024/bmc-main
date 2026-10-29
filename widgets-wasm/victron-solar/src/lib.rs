@@ -158,7 +158,14 @@ mod wasm_glue {
         }
         SOCKET.set(tls_connect_insecure(&host, port, on_socket_event));
         if SOCKET.with_borrow(Option::is_none) {
+            log_warn!(
+                "victron-solar: host refused a connection to {}:{}",
+                host,
+                port
+            );
             set_status(Status::Unreachable);
+        } else {
+            log_info!("victron-solar: connecting to {}:{}", host, port);
         }
     }
 
@@ -170,6 +177,7 @@ mod wasm_glue {
     fn on_socket_event(socket: &Socket, event: &SocketEvent<'_>) {
         match event {
             SocketEvent::Connected => {
+                log_info!("victron-solar: TLS connected, logging in to MQTT");
                 socket.write(&mqtt::connect(&fmt!("bmc-victron-solar-{}", now_secs())));
             }
             SocketEvent::Data(bytes) => on_data(socket, bytes),
@@ -192,6 +200,7 @@ mod wasm_glue {
             while let Some(packet) = s.decoder.next_packet() {
                 match packet {
                     Incoming::ConnAck(0) => {
+                        log_info!("victron-solar: MQTT session up, looking for the portal id");
                         socket.write(&mqtt::subscribe(1, &[venus::DISCOVERY_FILTER]));
                     }
                     Incoming::ConnAck(code) => {
@@ -212,6 +221,7 @@ mod wasm_glue {
                                 socket.write(&mqtt::publish(&fmt!("R/{}/keepalive", portal), b""));
                                 s.ledger = kv::get_string(&ledger_key(portal))
                                     .and_then(|t| Ledger::from_text(&t));
+                                log_info!("victron-solar: GX portal {}, subscribed", portal);
                                 s.portal = Some(portal.to_string());
                                 s.status = Some(Status::Live);
                             }
@@ -243,6 +253,7 @@ mod wasm_glue {
                         ledger.observe(today, hour, lifetime, &daily)
                     } else {
                         s.ledger = Some(Ledger::seed(today, lifetime, &daily));
+                        log_info!("victron-solar: started the totals from the GX's daily history");
                         true
                     };
                     let ledger = s.ledger.as_ref().expect("set above");
@@ -276,6 +287,7 @@ mod wasm_glue {
     }
 
     fn on_tick(_timer: &Timer, _periods: u32) {
+        log_debug!("victron-solar: tick");
         let stale = SESSION.with_borrow(|s| now_secs() - s.last_rx_secs > STALE_SECS);
         if SOCKET.with_borrow(Option::is_none) || stale {
             if stale {
@@ -303,11 +315,15 @@ mod wasm_glue {
     #[unsafe(no_mangle)]
     pub extern "C" fn init() {
         TICK.set(timer::start(TICK_MS, on_tick));
+        if TICK.with_borrow(Option::is_none) {
+            log_warn!("victron-solar: host refused the keepalive timer");
+        }
         connect();
     }
 
     #[unsafe(no_mangle)]
     pub extern "C" fn on_params_update() {
+        log_info!("victron-solar: settings changed, reconnecting");
         // A different GX: its counters have nothing to do with the old one's.
         DATA.set(SolarData::default());
         SESSION.with_borrow_mut(|s| s.ledger = None);
