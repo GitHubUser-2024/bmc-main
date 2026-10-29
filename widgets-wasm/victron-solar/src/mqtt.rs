@@ -5,10 +5,13 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! The slice of MQTT 3.1.1 this widget needs to read a Victron GX broker:
+//! The slice of MQTT 3.1.1 this widget needs to read a Venus OS broker:
 //! CONNECT, SUBSCRIBE and PUBLISH out, CONNACK and PUBLISH in, PINGREQ to
 //! keep the session up. QoS 0 only, so no packet ids need tracking beyond
 //! the one SUBSCRIBE carries.
+
+pub const TLS_PORT: u16 = 8883;
+pub const PLAIN_PORT: u16 = 1883;
 
 /// Seconds the broker waits without hearing from us before it drops the
 /// session; we ping well inside it.
@@ -100,7 +103,7 @@ pub struct Decoder {
     buf: Vec<u8>,
 }
 
-/// Packets larger than this are dropped whole: a GX never sends one,
+/// Packets larger than this are dropped whole: Venus OS never sends one,
 /// so it can only be a corrupt length and must not grow the buffer forever.
 const MAX_PACKET: usize = 64 * 1024;
 

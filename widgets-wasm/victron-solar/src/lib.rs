@@ -6,15 +6,18 @@
 // (at your option) any later version.
 
 //! Victron Solar widget — live PV power and solar yield (today, this month,
-//! this year) read straight from a Victron GX device.
+//! this year) read straight from the device running Venus OS in a Victron
+//! system, over the local network.
 //!
-//! Every GX (Cerbo, Ekrano, Venus GX, Venus OS on a Pi) runs an MQTT broker;
-//! the widget holds one TLS connection to it (the GX's certificate is
-//! self-signed), finds the portal id, subscribes to the solar topics and
-//! sends the keepalive that makes Venus OS publish them. See [`venus`] for
-//! the topics, [`totals`] for how month/year are counted.
+//! Three ways in, picked in the settings: MQTT over TLS (the device's
+//! certificate is self-signed), plain MQTT, or Modbus TCP. Over MQTT the
+//! widget finds the portal id, subscribes to the solar topics and sends the
+//! keepalive that makes Venus OS publish them (see [`venus`]); over Modbus
+//! it scans for solar devices and polls them (see [`modbus`]). Either way
+//! the same [`venus::Readings`] feed [`totals`], which counts month/year.
 
 mod manifest_params;
+mod modbus;
 mod mqtt;
 mod totals;
 mod venus;
@@ -23,7 +26,7 @@ mod venus;
 mod wasm_glue {
     use std::cell::RefCell;
 
-    use bmc_wasm_sdk::socket::{Socket, SocketEvent, tls_connect_insecure};
+    use bmc_wasm_sdk::socket::{Socket, SocketEvent, tcp_connect, tls_connect_insecure};
     use bmc_wasm_sdk::timer::{self, Timer};
     use bmc_wasm_sdk::types::Availability;
     #[expect(
@@ -32,20 +35,23 @@ mod wasm_glue {
     )]
     use bmc_wasm_sdk::*;
 
-    use super::manifest_params;
-    use super::mqtt::{self, Decoder, Incoming};
+    use super::manifest_params::{self, Connection};
+    use super::modbus::{self, Poller, YieldCounters};
+    use super::mqtt::{self, Incoming};
     use super::totals::{Date, Ledger, Totals};
     use super::venus::{self, Readings};
 
-    /// Ping + keepalive cadence. Venus OS stops publishing ~60 s after the
-    /// last keepalive, and the MQTT session itself expires after
+    /// Modbus polling cadence; MQTT only pings every [`KEEPALIVE_SECS`].
+    const TICK_MS: u32 = 5_000;
+    /// MQTT ping + keepalive cadence. Venus OS stops publishing ~60 s after
+    /// the last keepalive, and the MQTT session itself expires after
     /// [`mqtt::KEEPALIVE_SECS`].
-    const TICK_MS: u32 = 25_000;
+    const KEEPALIVE_SECS: i64 = 25;
     /// No packet at all for this long: the connection is dead, reconnect.
     const STALE_SECS: i64 = 90;
     /// Sent on every keepalive after the first: refreshes the subscription
-    /// without making the GX republish every value (older Venus OS ignores
-    /// the option and republishes, which is merely heavier).
+    /// without making Venus OS republish every value (older versions ignore
+    /// the option and republish, which is merely heavier).
     const KEEPALIVE_QUIET: &[u8] = br#"{"keepalive-options": ["suppress-republish"]}"#;
 
     const NOT_AVAILABLE: &str = "--";
@@ -61,11 +67,15 @@ mod wasm_glue {
         Live,
         Unreachable,
         Refused(u8),
+        /// Modbus found neither a solar charger nor a PV inverter.
+        NoSolar,
     }
 
     #[derive(Clone, Copy)]
     struct SolarData {
         status: Status,
+        /// "MQTT" or "Modbus TCP", for the status line.
+        service: &'static str,
         pv_power_w: Availability<f64>,
         today_kwh: Availability<f64>,
         month_kwh: Availability<f64>,
@@ -80,6 +90,7 @@ mod wasm_glue {
         fn default() -> Self {
             Self {
                 status: Status::Connecting,
+                service: "MQTT",
                 pv_power_w: Availability::default(),
                 today_kwh: Availability::default(),
                 month_kwh: Availability::default(),
@@ -92,13 +103,26 @@ mod wasm_glue {
         }
     }
 
+    enum Link {
+        Mqtt(mqtt::Decoder),
+        Modbus(modbus::Decoder, Poller),
+    }
+
+    impl Default for Link {
+        fn default() -> Self {
+            Self::Mqtt(mqtt::Decoder::default())
+        }
+    }
+
     #[derive(Default)]
     struct Session {
-        decoder: Decoder,
+        link: Link,
+        /// The device's id (MQTT portal id = serial number); keys what's kept on the Deck.
         portal: Option<String>,
         readings: Readings,
         ledger: Option<Ledger>,
         last_rx_secs: i64,
+        last_keepalive_secs: i64,
         status: Option<Status>,
     }
 
@@ -110,7 +134,7 @@ mod wasm_glue {
     }
 
     // ---------------------------------------------------------------------
-    // GX connection
+    // Connection
     // ---------------------------------------------------------------------
 
     fn now_secs() -> i64 {
@@ -138,25 +162,47 @@ mod wasm_glue {
         fmt!("ledger-{}", portal)
     }
 
+    fn yield_counters_key(portal: &str) -> String {
+        fmt!("modbus-yield-{}", portal)
+    }
+
     fn connect() {
         let params = manifest_params::Params::current();
         let host = params.gx_host.trim().to_string();
-        let port = u16::try_from(params.gx_port).unwrap_or(8883);
+        let (link, service, standard_port) = match params.connection {
+            Connection::MqttTls => (Link::default(), "MQTT", mqtt::TLS_PORT),
+            Connection::Mqtt => (Link::default(), "MQTT", mqtt::PLAIN_PORT),
+            Connection::Modbus => (
+                Link::Modbus(modbus::Decoder::default(), Poller::default()),
+                "Modbus TCP",
+                modbus::STANDARD_PORT,
+            ),
+        };
+        let port = u16::try_from(params.port)
+            .ok()
+            .filter(|&p| p != 0)
+            .unwrap_or(standard_port);
         SESSION.with_borrow_mut(|s| {
             let ledger = s.ledger.take();
             *s = Session {
+                link,
                 last_rx_secs: now_secs(),
                 ..Session::default()
             };
             s.ledger = ledger;
         });
+        DATA.with_borrow_mut(|d| d.service = service);
         set_status(Status::Connecting);
         if host.is_empty() {
             SOCKET.set(None);
             set_status(Status::Unreachable);
             return;
         }
-        SOCKET.set(tls_connect_insecure(&host, port, on_socket_event));
+        SOCKET.set(if matches!(params.connection, Connection::MqttTls) {
+            tls_connect_insecure(&host, port, on_socket_event)
+        } else {
+            tcp_connect(&host, port, on_socket_event)
+        });
         if SOCKET.with_borrow(Option::is_none) {
             log_warn!(
                 "victron-solar: host refused a connection to {}:{}",
@@ -165,7 +211,12 @@ mod wasm_glue {
             );
             set_status(Status::Unreachable);
         } else {
-            log_info!("victron-solar: connecting to {}:{}", host, port);
+            log_info!(
+                "victron-solar: connecting to {}:{} ({})",
+                host,
+                port,
+                service
+            );
         }
     }
 
@@ -177,12 +228,24 @@ mod wasm_glue {
     fn on_socket_event(socket: &Socket, event: &SocketEvent<'_>) {
         match event {
             SocketEvent::Connected => {
-                log_info!("victron-solar: TLS connected, logging in to MQTT");
-                socket.write(&mqtt::connect(&fmt!("bmc-victron-solar-{}", now_secs())));
+                let first = SESSION.with_borrow_mut(|s| match &mut s.link {
+                    Link::Mqtt(_) => {
+                        log_info!("victron-solar: connected, logging in to MQTT");
+                        // Random, so two widgets on one Deck don't kick each other off the broker.
+                        Some(mqtt::connect(&fmt!("bmc-solar-{}", host::random_u32())))
+                    }
+                    Link::Modbus(_, poller) => {
+                        log_info!("victron-solar: connected, reading over Modbus");
+                        poller.start()
+                    }
+                });
+                if let Some(first) = first {
+                    socket.write(&first);
+                }
             }
             SocketEvent::Data(bytes) => on_data(socket, bytes),
             SocketEvent::Closed(code) => {
-                log_info!("victron-solar: GX connection closed ({})", code);
+                log_info!("victron-solar: connection closed ({})", code);
                 SOCKET.set(None);
                 // A refusal is the more useful thing to show than the close that follows it.
                 if !matches!(DATA.with_borrow(|d| d.status), Status::Refused(_)) {
@@ -193,42 +256,12 @@ mod wasm_glue {
     }
 
     fn on_data(socket: &Socket, bytes: &[u8]) {
-        let mut changed = false;
-        SESSION.with_borrow_mut(|s| {
+        let changed = SESSION.with_borrow_mut(|s| {
             s.last_rx_secs = now_secs();
-            s.decoder.push(bytes);
-            while let Some(packet) = s.decoder.next_packet() {
-                match packet {
-                    Incoming::ConnAck(0) => {
-                        log_info!("victron-solar: MQTT session up, looking for the portal id");
-                        socket.write(&mqtt::subscribe(1, &[venus::DISCOVERY_FILTER]));
-                    }
-                    Incoming::ConnAck(code) => {
-                        log_warn!(
-                            "victron-solar: GX refused the MQTT connection (code {})",
-                            code
-                        );
-                        s.status = Some(Status::Refused(code));
-                    }
-                    Incoming::Publish { topic, payload } => match s.portal.clone() {
-                        Some(portal) => changed |= s.readings.apply(&portal, &topic, &payload),
-                        None => {
-                            if let Some(portal) = venus::portal_from_serial_topic(&topic) {
-                                let filters = venus::subscriptions(portal);
-                                let filters: Vec<&str> =
-                                    filters.iter().map(String::as_str).collect();
-                                socket.write(&mqtt::subscribe(2, &filters));
-                                socket.write(&mqtt::publish(&fmt!("R/{}/keepalive", portal), b""));
-                                s.ledger = kv::get_string(&ledger_key(portal))
-                                    .and_then(|t| Ledger::from_text(&t));
-                                log_info!("victron-solar: GX portal {}, subscribed", portal);
-                                s.portal = Some(portal.to_string());
-                                s.status = Some(Status::Live);
-                            }
-                        }
-                    },
-                    Incoming::Other => {}
-                }
+            if matches!(s.link, Link::Mqtt(_)) {
+                on_mqtt_data(s, socket, bytes)
+            } else {
+                on_modbus_data(s, socket, bytes)
             }
         });
         if let Some(status) = SESSION.with_borrow_mut(|s| s.status.take()) {
@@ -237,6 +270,108 @@ mod wasm_glue {
         if changed {
             recompute();
         }
+    }
+
+    /// The device answered with its id: pick up what was kept for it.
+    fn adopt_portal(s: &mut Session, portal: &str) {
+        s.ledger = kv::get_string(&ledger_key(portal)).and_then(|t| Ledger::from_text(&t));
+        s.portal = Some(portal.to_string());
+        s.status = Some(Status::Live);
+    }
+
+    fn on_mqtt_data(s: &mut Session, socket: &Socket, bytes: &[u8]) -> bool {
+        let mut changed = false;
+        if let Link::Mqtt(decoder) = &mut s.link {
+            decoder.push(bytes);
+        }
+        loop {
+            let Link::Mqtt(decoder) = &mut s.link else {
+                return changed;
+            };
+            let Some(packet) = decoder.next_packet() else {
+                return changed;
+            };
+            match packet {
+                Incoming::ConnAck(0) => {
+                    log_info!("victron-solar: MQTT session up, looking for the portal id");
+                    socket.write(&mqtt::subscribe(1, &[venus::DISCOVERY_FILTER]));
+                }
+                Incoming::ConnAck(code) => {
+                    log_warn!("victron-solar: MQTT connection refused (code {})", code);
+                    s.status = Some(Status::Refused(code));
+                }
+                Incoming::Publish { topic, payload } => match s.portal.clone() {
+                    Some(portal) => changed |= s.readings.apply(&portal, &topic, &payload),
+                    None => {
+                        if let Some(portal) = venus::portal_from_serial_topic(&topic) {
+                            let filters = venus::subscriptions(portal);
+                            let filters: Vec<&str> = filters.iter().map(String::as_str).collect();
+                            socket.write(&mqtt::subscribe(2, &filters));
+                            socket.write(&mqtt::publish(&fmt!("R/{}/keepalive", portal), b""));
+                            s.last_keepalive_secs = now_secs();
+                            log_info!("victron-solar: portal id {}, subscribed", portal);
+                            adopt_portal(s, portal);
+                        }
+                    }
+                },
+                Incoming::Other => {}
+            }
+        }
+    }
+
+    fn on_modbus_data(s: &mut Session, socket: &Socket, bytes: &[u8]) -> bool {
+        let Link::Modbus(decoder, poller) = &mut s.link else {
+            return false;
+        };
+        decoder.push(bytes);
+        let mut changed = false;
+        let mut portal = None;
+        while let Some(response) = decoder.next_response() {
+            let step = poller.on_response(response, &mut s.readings);
+            if let Some(next) = &step.send {
+                socket.write(next);
+            }
+            changed |= step.changed;
+            match step.event {
+                Some(modbus::Event::Portal(serial)) => {
+                    log_info!(
+                        "victron-solar: serial {}, scanning for solar devices",
+                        serial
+                    );
+                    poller.yield_counters = kv::get_string(&yield_counters_key(&serial))
+                        .and_then(|t| YieldCounters::from_text(&t))
+                        .unwrap_or_default();
+                    portal = Some(serial);
+                }
+                Some(modbus::Event::Found {
+                    chargers,
+                    pv_inverters,
+                }) => {
+                    log_info!(
+                        "victron-solar: found {} solar charger(s), {} PV inverter(s)",
+                        chargers,
+                        pv_inverters
+                    );
+                    if chargers + pv_inverters == 0 {
+                        s.status = Some(Status::NoSolar);
+                    }
+                }
+                None => {}
+            }
+            if poller.yield_counters.dirty
+                && let Some(p) = s.portal.as_deref()
+            {
+                poller.yield_counters.dirty = false;
+                kv::set(
+                    &yield_counters_key(p),
+                    poller.yield_counters.to_text().as_bytes(),
+                );
+            }
+        }
+        if let Some(portal) = portal {
+            adopt_portal(s, &portal);
+        }
+        changed
     }
 
     /// Re-derive what's on screen from the readings, rolling the ledger
@@ -253,12 +388,20 @@ mod wasm_glue {
                         ledger.observe(today, hour, lifetime, &daily)
                     } else {
                         s.ledger = Some(Ledger::seed(today, lifetime, &daily));
-                        log_info!("victron-solar: started the totals from the GX's daily history");
+                        log_info!(
+                            "victron-solar: started the totals from {} day(s) of history",
+                            daily.len()
+                        );
                         true
                     };
                     let ledger = s.ledger.as_ref().expect("set above");
                     if changed {
                         kv::set(&ledger_key(portal), ledger.to_text().as_bytes());
+                        // Daily, so a rollover while the widget is off is still caught.
+                        if let Link::Modbus(_, poller) = &s.link {
+                            let text = poller.yield_counters.to_text();
+                            kv::set(&yield_counters_key(portal), text.as_bytes());
+                        }
                     }
                     Some(ledger.totals(lifetime))
                 }
@@ -287,24 +430,36 @@ mod wasm_glue {
     }
 
     fn on_tick(_timer: &Timer, _periods: u32) {
-        log_debug!("victron-solar: tick");
-        let stale = SESSION.with_borrow(|s| now_secs() - s.last_rx_secs > STALE_SECS);
+        let now = now_secs();
+        let stale = SESSION.with_borrow(|s| now - s.last_rx_secs > STALE_SECS);
         if SOCKET.with_borrow(Option::is_none) || stale {
             if stale {
-                log_info!("victron-solar: no data from the GX, reconnecting");
+                log_info!("victron-solar: no data from the device, reconnecting");
             }
             connect();
             return;
         }
-        let portal = SESSION.with_borrow(|s| s.portal.clone());
-        SOCKET.with_borrow(|socket| {
-            if let Some(socket) = socket {
-                socket.write(&mqtt::pingreq());
-                if let Some(portal) = portal {
-                    socket.write(&mqtt::publish(
+        let out: Vec<Vec<u8>> = SESSION.with_borrow_mut(|s| match &mut s.link {
+            Link::Mqtt(_) => {
+                if now - s.last_keepalive_secs < KEEPALIVE_SECS {
+                    return Vec::new();
+                }
+                s.last_keepalive_secs = now;
+                let mut out = vec![mqtt::pingreq()];
+                if let Some(portal) = &s.portal {
+                    out.push(mqtt::publish(
                         &fmt!("R/{}/keepalive", portal),
                         KEEPALIVE_QUIET,
                     ));
+                }
+                out
+            }
+            Link::Modbus(_, poller) => poller.request_round(&mut s.readings).into_iter().collect(),
+        });
+        SOCKET.with_borrow(|socket| {
+            if let Some(socket) = socket {
+                for bytes in &out {
+                    socket.write(bytes);
                 }
             }
         });
@@ -316,7 +471,7 @@ mod wasm_glue {
     pub extern "C" fn init() {
         TICK.set(timer::start(TICK_MS, on_tick));
         if TICK.with_borrow(Option::is_none) {
-            log_warn!("victron-solar: host refused the keepalive timer");
+            log_warn!("victron-solar: host refused the poll timer");
         }
         connect();
     }
@@ -324,7 +479,7 @@ mod wasm_glue {
     #[unsafe(no_mangle)]
     pub extern "C" fn on_params_update() {
         log_info!("victron-solar: settings changed, reconnecting");
-        // A different GX: its counters have nothing to do with the old one's.
+        // Maybe a different device: its totals are picked up by its own id.
         DATA.set(SolarData::default());
         SESSION.with_borrow_mut(|s| s.ledger = None);
         connect();
@@ -508,11 +663,15 @@ mod wasm_glue {
     fn status_line(data: &SolarData) -> Option<String> {
         match data.status {
             Status::Live => None,
-            Status::Connecting => Some("Connecting to GX…".to_string()),
-            Status::Unreachable => {
-                Some("GX not reachable — check address and MQTT on LAN".to_string())
+            Status::Connecting => Some("Connecting…".to_string()),
+            Status::Unreachable => Some(fmt!(
+                "Not reachable — check the address and that {} is enabled",
+                data.service
+            )),
+            Status::Refused(code) => {
+                Some(fmt!("MQTT login refused (code {}) — password set?", code))
             }
-            Status::Refused(code) => Some(fmt!("GX refused MQTT (code {}) — password set?", code)),
+            Status::NoSolar => Some("No solar charger or PV inverter found".to_string()),
         }
     }
 

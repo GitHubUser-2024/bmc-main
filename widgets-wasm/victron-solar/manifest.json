@@ -3,8 +3,8 @@
   "uid": "99e3fa96-a60b-4cf1-a5e9-4da61b216067",
   "version": "0.1.0",
   "name": "Solar (Victron)",
-  "subname": "Victron GX",
-  "description": "Live PV power and solar yield (today, month, year) read directly from a Victron GX device (Cerbo, Ekrano, Venus GX) over MQTT. Enable MQTT on LAN (TLS 8883) on the GX.",
+  "subname": "Venus OS",
+  "description": "Live PV power and solar yield (today, month, year) read directly from a Victron system running Venus OS, over MQTT or Modbus TCP on the local network.",
   "binary": "bin/victron-solar",
   "icon": "assets/icon.svg",
   "category": "utility",
@@ -29,18 +29,39 @@
   ],
   "params": {
     "gx_host": {
-      "name": "GX address",
-      "description": "IP address or hostname of the Victron GX device, e.g. 192.168.1.50 or venus.local",
+      "name": "Address",
+      "description": "IP address or hostname of the device running Venus OS, e.g. 192.168.1.50 or venus.local",
       "type": "string",
       "default_value": "venus.local"
     },
-    "gx_port": {
-      "name": "MQTT TLS port",
-      "description": "The GX broker's TLS port; 8883 unless changed",
+    "connection": {
+      "name": "Connection",
+      "description": "How to read the data; the same service must be enabled on the device",
+      "type": "string",
+      "default_value": "mqtt-tls",
+      "enum_values": [
+        {
+          "value": "mqtt-tls",
+          "label": "MQTT over TLS"
+        },
+        {
+          "value": "mqtt",
+          "label": "MQTT, unencrypted"
+        },
+        {
+          "value": "modbus",
+          "label": "Modbus TCP"
+        }
+      ],
+      "enum_control": "radio"
+    },
+    "port": {
+      "name": "Port",
+      "description": "0 = the connection's standard port (8883, 1883 or 502)",
       "type": "integer",
-      "min": 1,
+      "min": 0,
       "max": 65535,
-      "default_value": 8883
+      "default_value": 0
     }
   }
 }

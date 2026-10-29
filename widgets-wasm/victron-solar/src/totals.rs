@@ -7,7 +7,8 @@
 
 //! Today / month / year solar totals from a lifetime energy counter.
 //!
-//! A GX only knows the lifetime total and, per MPPT, the last 31 days.
+//! Venus OS only knows the lifetime total and, per MPPT, the last 31 days
+//! (MQTT) or just today and yesterday (Modbus TCP).
 //! The [`Ledger`] remembers the lifetime reading at the start of the
 //! current day, month and year (persisted by the caller), so each total
 //! is "lifetime now − lifetime at the period's start". On first use the

@@ -8,18 +8,59 @@
 
 use bmc_wasm_sdk::params as snapshot;
 use bmc_wasm_sdk::params::typed::ParamRead;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Connection {
+    MqttTls,
+    Mqtt,
+    Modbus,
+}
+impl Connection {
+    /// Every variant, in manifest-declaration order. Useful when a widget
+    /// wants to render a "pick one" UI or audit the enum exhaustively.
+    pub const ALL: &'static [Self] = &[Self::MqttTls, Self::Mqtt, Self::Modbus];
+    /// Manifest wire value for this variant.
+    #[must_use]
+    pub fn as_manifest_value(self) -> &'static str {
+        match self {
+            Self::MqttTls => "mqtt-tls",
+            Self::Mqtt => "mqtt",
+            Self::Modbus => "modbus",
+        }
+    }
+    /// Human-readable label declared in the manifest's `enum_values`.
+    #[must_use]
+    pub fn as_manifest_label(self) -> &'static str {
+        match self {
+            Self::MqttTls => "MQTT over TLS",
+            Self::Mqtt => "MQTT, unencrypted",
+            Self::Modbus => "Modbus TCP",
+        }
+    }
+    #[must_use]
+    pub fn from_manifest_value(s: &str) -> Option<Self> {
+        match s {
+            "mqtt-tls" => Some(Self::MqttTls),
+            "mqtt" => Some(Self::Mqtt),
+            "modbus" => Some(Self::Modbus),
+            _ => None,
+        }
+    }
+}
+bmc_wasm_sdk::impl_manifest_str_enum!(Connection);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
+    pub connection: Connection,
     pub gx_host: String,
-    pub gx_port: i32,
+    pub port: i32,
 }
 impl Params {
     /// Materialise a typed snapshot from a dynamic [`snapshot::Params`].
     #[must_use]
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
+            connection: <Connection as ParamRead>::read_required(snap, "connection"),
             gx_host: <String as ParamRead>::read_required(snap, "gx_host"),
-            gx_port: <i32 as ParamRead>::read_required(snap, "gx_port"),
+            port: <i32 as ParamRead>::read_required(snap, "port"),
         }
     }
     /// Latest typed snapshot delivered for this widget instance.
@@ -65,11 +106,14 @@ impl Params {
     #[must_use]
     pub fn changed_keys(&self, other: &Self) -> Vec<&'static str> {
         let mut out = Vec::new();
+        if self.connection != other.connection {
+            out.push("connection");
+        }
         if self.gx_host != other.gx_host {
             out.push("gx_host");
         }
-        if self.gx_port != other.gx_port {
-            out.push("gx_port");
+        if self.port != other.port {
+            out.push("port");
         }
         out
     }

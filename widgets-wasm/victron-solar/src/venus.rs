@@ -5,9 +5,9 @@
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 
-//! Venus OS (Victron GX) MQTT topics → solar readings.
+//! Solar readings of a Venus OS system, and the MQTT topics they come from.
 //!
-//! Every GX publishes `N/<portal id>/<service>/<instance>/<path>` with a
+//! Every Venus OS device publishes `N/<portal id>/<service>/<instance>/<path>` with a
 //! `{"value": …}` payload. Solar comes from two kinds of device, any number
 //! of each: MPPT solar chargers (DC-coupled) and PV inverters (AC-coupled,
 //! e.g. Fronius). Venus OS already totals their live power under
@@ -45,7 +45,7 @@ pub fn portal_from_serial_topic(topic: &str) -> Option<&str> {
 }
 
 /// The number in a `{"value": <number>}` payload; `None` for `null`,
-/// an empty payload (the GX's way of saying a path disappeared) or a string.
+/// an empty payload (Venus OS's way of saying a path disappeared) or a string.
 #[must_use]
 pub fn payload_value(payload: &[u8]) -> Option<f64> {
     let text = core::str::from_utf8(payload).ok()?;
@@ -57,7 +57,8 @@ pub fn payload_value(payload: &[u8]) -> Option<f64> {
     rest[..end].parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
-/// Live state assembled from the GX, keyed by device instance.
+/// Live state assembled from the device, keyed by device instance (MQTT)
+/// or Modbus unit id.
 #[derive(Default, Debug)]
 pub struct Readings {
     dc_pv_w: Option<f64>,
@@ -66,8 +67,9 @@ pub struct Readings {
     mppt_lifetime_kwh: BTreeMap<u32, f64>,
     mppt_daily_kwh: BTreeMap<u32, [Option<f64>; DAILY_HISTORY_DAYS]>,
     pvinverter_lifetime_kwh: BTreeMap<u32, f64>,
-    /// Set once the GX says it has sent every value after a keepalive;
-    /// counters summed before that may be missing a device.
+    /// Set once every device has reported (MQTT: the broker says it has sent
+    /// every value; Modbus: one full round of reads); counters summed before
+    /// that may be missing a device.
     pub complete: bool,
 }
 
@@ -89,17 +91,13 @@ impl Readings {
         let value = payload_value(payload);
         let parts: Vec<&str> = path.split('/').collect();
         match parts.as_slice() {
-            ["system", "0", "Dc", "Pv", "Power"] => self.dc_pv_w = value,
+            ["system", "0", "Dc", "Pv", "Power"] => self.set_dc_pv_w(value),
             ["system", "0", "Ac", kind, phase, "Power"] if kind.starts_with("PvOn") => {
-                let key = format!("{kind}/{phase}");
-                match value {
-                    Some(v) => self.ac_pv_w.insert(key, v),
-                    None => self.ac_pv_w.remove(&key),
-                };
+                self.set_ac_pv_w(&format!("{kind}/{phase}"), value);
             }
             ["solarcharger", inst, "Yield", "User"] => {
                 let Ok(inst) = inst.parse() else { return false };
-                set_or_remove(&mut self.mppt_lifetime_kwh, inst, value);
+                self.set_charger_lifetime_kwh(inst, value);
             }
             ["solarcharger", inst, "History", "Daily", day, "Yield"] => {
                 let (Ok(inst), Ok(day)) = (inst.parse(), day.parse::<usize>()) else {
@@ -108,17 +106,48 @@ impl Readings {
                 if day >= DAILY_HISTORY_DAYS {
                     return false;
                 }
-                self.mppt_daily_kwh
-                    .entry(inst)
-                    .or_insert([None; DAILY_HISTORY_DAYS])[day] = value;
+                self.set_charger_day_kwh(inst, day, value);
             }
             ["pvinverter", inst, "Ac", "Energy", "Forward"] => {
                 let Ok(inst) = inst.parse() else { return false };
-                set_or_remove(&mut self.pvinverter_lifetime_kwh, inst, value);
+                self.set_pvinverter_lifetime_kwh(inst, value);
             }
             _ => return false,
         }
         true
+    }
+
+    pub fn set_dc_pv_w(&mut self, value: Option<f64>) {
+        self.dc_pv_w = value;
+    }
+
+    /// `key` is `<PvOnGrid|PvOnOutput|PvOnGenset>/<L1..L3>`.
+    pub fn set_ac_pv_w(&mut self, key: &str, value: Option<f64>) {
+        match value {
+            Some(v) => self.ac_pv_w.insert(key.to_owned(), v),
+            None => self.ac_pv_w.remove(key),
+        };
+    }
+
+    pub fn set_charger_lifetime_kwh(&mut self, inst: u32, value: Option<f64>) {
+        set_or_remove(&mut self.mppt_lifetime_kwh, inst, value);
+    }
+
+    /// `day` 0 is today. Panics past [`DAILY_HISTORY_DAYS`].
+    pub fn set_charger_day_kwh(&mut self, inst: u32, day: usize, value: Option<f64>) {
+        self.mppt_daily_kwh
+            .entry(inst)
+            .or_insert([None; DAILY_HISTORY_DAYS])[day] = value;
+    }
+
+    /// A charger that stopped answering: drop everything it contributed.
+    pub fn remove_charger(&mut self, inst: u32) {
+        self.mppt_lifetime_kwh.remove(&inst);
+        self.mppt_daily_kwh.remove(&inst);
+    }
+
+    pub fn set_pvinverter_lifetime_kwh(&mut self, inst: u32, value: Option<f64>) {
+        set_or_remove(&mut self.pvinverter_lifetime_kwh, inst, value);
     }
 
     /// Live PV power: DC (all MPPTs) plus AC-coupled PV on every phase.
@@ -176,7 +205,7 @@ fn set_or_remove(map: &mut BTreeMap<u32, f64>, key: u32, value: Option<f64>) {
 mod tests {
     use super::*;
 
-    const P: &str = "00e93aac3451";
+    const P: &str = "0123456789ab";
 
     fn feed(r: &mut Readings, path: &str, payload: &str) -> bool {
         r.apply(P, &format!("N/{P}/{path}"), payload.as_bytes())
@@ -185,15 +214,15 @@ mod tests {
     #[test]
     fn finds_the_portal_from_the_serial_topic_only() {
         assert_eq!(
-            portal_from_serial_topic("N/00e93aac3451/system/0/Serial"),
+            portal_from_serial_topic("N/0123456789ab/system/0/Serial"),
             Some(P)
         );
         assert_eq!(
-            portal_from_serial_topic("N/00e93aac3451/system/0/Serial/x"),
+            portal_from_serial_topic("N/0123456789ab/system/0/Serial/x"),
             None
         );
         assert_eq!(
-            portal_from_serial_topic("R/00e93aac3451/system/0/Serial"),
+            portal_from_serial_topic("R/0123456789ab/system/0/Serial"),
             None
         );
     }
