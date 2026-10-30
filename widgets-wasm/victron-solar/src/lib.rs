@@ -515,7 +515,7 @@ mod wasm_glue {
     const SMALL: SizeParams = SizeParams {
         header_font: 16,
         icon_px: 18.0,
-        power_font: 40,
+        power_font: 80,
         label_font: 13,
         value_font: 18,
         sub_font: 11,
@@ -526,7 +526,7 @@ mod wasm_glue {
     const MEDIUM: SizeParams = SizeParams {
         header_font: 18,
         icon_px: 20.0,
-        power_font: 56,
+        power_font: 112,
         label_font: 14,
         value_font: 22,
         sub_font: 12,
@@ -537,7 +537,7 @@ mod wasm_glue {
     const LARGE: SizeParams = SizeParams {
         header_font: 20,
         icon_px: 22.0,
-        power_font: 72,
+        power_font: 144,
         label_font: 16,
         value_font: 26,
         sub_font: 13,
@@ -548,7 +548,7 @@ mod wasm_glue {
     const FULL: SizeParams = SizeParams {
         header_font: 24,
         icon_px: 28.0,
-        power_font: 96,
+        power_font: 192,
         label_font: 20,
         value_font: 34,
         sub_font: 16,
@@ -587,6 +587,39 @@ mod wasm_glue {
             Availability::Available(w) => fmt!("{} W", format_number!(w, 0)),
             Availability::Unavailable | Availability::Failed => NOT_AVAILABLE.to_string(),
         }
+    }
+
+    /// Width of `text` in DeckSans Bold at 1 px, from the font's advances
+    /// (its digits are tabular); the SDK can't measure text.
+    fn bold_width_em(text: &str) -> f32 {
+        text.chars()
+            .map(|c| match c {
+                ',' | '.' => 0.310,
+                ' ' | '\u{a0}' => 0.236,
+                'W' => 0.973,
+                '-' => 0.403,
+                _ => 0.600,
+            })
+            .sum()
+    }
+
+    /// The live power figure at `size`, shrunk only as far as it must be to
+    /// fit between the paddings of a `width` wide widget: four digits don't
+    /// fit the small layout at full size.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "widget widths and font sizes are small positive pixel counts"
+    )]
+    fn power_text(data: &SolarData, size: u32, width: u32, padding: f32) -> Node {
+        let power = power_str(data);
+        let room = width as f32 - 2.0 * padding;
+        let fit = (room / bold_width_em(&power)).floor().max(1.0) as u32;
+        text(
+            power,
+            style!(size: size.min(fit), weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
+        )
     }
 
     fn kwh_str(v: Availability<f64>) -> String {
@@ -689,17 +722,14 @@ mod wasm_glue {
         status_line(data).map(|s| text(s, style!(size: sp.sub_font, color: ORANGE_50)))
     }
 
-    fn view_rect(sp: &SizeParams, data: &SolarData) -> Node {
+    fn view_rect(ws: WidgetSize, sp: &SizeParams, data: &SolarData) -> Node {
         let mut top = vec![header(sp.header_font, sp.icon_px)];
         top.extend(status_node(sp, data));
         col(
             props!(background: BG_COLOR, padding: sp.padding, gap: sp.gap),
             [
                 col(props!(gap: 2.0), top),
-                text(
-                    power_str(data),
-                    style!(size: sp.power_font, weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
-                ),
+                power_text(data, sp.power_font, ws.width, sp.padding),
                 col(
                     props!(gap: sp.gap, flex: 1.0, justify_content: Justify::End),
                     stats(sp, data),
@@ -716,7 +746,7 @@ mod wasm_glue {
         let sp = SizeParams {
             header_font: scale_font(20, scale),
             icon_px: 22.0 * scale,
-            power_font: scale_font(64, scale),
+            power_font: scale_font(128, scale),
             label_font: scale_font(15, scale),
             value_font: scale_font(22, scale),
             sub_font: scale_font(13, scale),
@@ -726,12 +756,7 @@ mod wasm_glue {
         };
         let mut children = vec![header(sp.header_font, sp.icon_px)];
         children.extend(status_node(&sp, data));
-        children.extend([
-            text(
-                power_str(data),
-                style!(size: sp.power_font, weight: FontWeight::BOLD, color: WHITE, family: FontFamily::DeckSans, line_height: 0.9),
-            ),
-        ]);
+        children.push(power_text(data, sp.power_font, ws.width, sp.padding));
         children.extend(stats(&sp, data));
         col(
             props!(background: BG_COLOR, padding: sp.padding, gap: sp.gap, cross_align: CrossAlign::Center),
@@ -747,7 +772,7 @@ mod wasm_glue {
         let root = if matches!(shape, ViewportShape::Round) {
             view_round(ws, &data)
         } else {
-            view_rect(size_params(ws.variant), &data)
+            view_rect(ws, size_params(ws.variant), &data)
         };
         let _ = render_ui(ws.width, ws.height, root);
     }
