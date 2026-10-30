@@ -515,7 +515,7 @@ mod wasm_glue {
     const SMALL: SizeParams = SizeParams {
         header_font: 16,
         icon_px: 18.0,
-        power_font: 80,
+        power_font: 72,
         label_font: 13,
         value_font: 18,
         sub_font: 11,
@@ -526,7 +526,7 @@ mod wasm_glue {
     const MEDIUM: SizeParams = SizeParams {
         header_font: 18,
         icon_px: 20.0,
-        power_font: 112,
+        power_font: 101,
         label_font: 14,
         value_font: 22,
         sub_font: 12,
@@ -537,7 +537,7 @@ mod wasm_glue {
     const LARGE: SizeParams = SizeParams {
         header_font: 20,
         icon_px: 22.0,
-        power_font: 144,
+        power_font: 130,
         label_font: 16,
         value_font: 26,
         sub_font: 13,
@@ -548,7 +548,7 @@ mod wasm_glue {
     const FULL: SizeParams = SizeParams {
         header_font: 24,
         icon_px: 28.0,
-        power_font: 192,
+        power_font: 173,
         label_font: 20,
         value_font: 34,
         sub_font: 16,
@@ -604,8 +604,8 @@ mod wasm_glue {
     }
 
     /// The live power figure at `size`, shrunk only as far as it must be to
-    /// fit between the paddings of a `width` wide widget: four digits don't
-    /// fit the small layout at full size.
+    /// fit between the paddings of a `width` wide widget: the small layout
+    /// has room for four digits, not five.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_precision_loss,
@@ -746,7 +746,7 @@ mod wasm_glue {
         let sp = SizeParams {
             header_font: scale_font(20, scale),
             icon_px: 22.0 * scale,
-            power_font: scale_font(128, scale),
+            power_font: scale_font(115, scale),
             label_font: scale_font(15, scale),
             value_font: scale_font(22, scale),
             sub_font: scale_font(13, scale),
