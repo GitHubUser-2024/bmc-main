@@ -20,26 +20,65 @@
 // the grant above.
 
 //! Immich photo widget — the image widget's picture pipeline, plus a
-//! **Label it** menu button that tags the photo on screen in Immich.
+//! **Label it** menu button that tags the photo on screen in Immich, which
+//! turns into **Remove label** once the photo has that tag.
 //!
 //! The photo URL points at a helper in front of Immich (the widget can't send
 //! headers, so it can't hold an Immich key). The helper names each photo in an
-//! `X-Immich-Asset` response header; **Label it** POSTs that id with the
-//! configured label as JSON to the label URL, and the helper tags the photo.
+//! `X-Immich-Asset` response header and its tags in `X-Immich-Tags`; the menu
+//! button POSTs the id with the configured label as JSON to the label URL
+//! (`"remove": true` to take the tag off), and the helper updates Immich.
 
 mod manifest_params;
 
 /// Response header naming the Immich asset a photo response carries.
 pub const ASSET_HEADER: &str = "X-Immich-Asset";
+/// Response header listing the asset's tags, each percent-encoded, comma-separated.
+pub const TAGS_HEADER: &str = "X-Immich-Tags";
 
-/// The JSON body **Label it** sends: `{"asset": …, "label": …}`.
+/// The JSON body the menu button sends: `{"asset": …, "label": …}`, plus
+/// `"remove": true` when it takes the label off.
 #[must_use]
-pub fn label_body(asset: &str, label: &str) -> String {
+pub fn label_body(asset: &str, label: &str, remove: bool) -> String {
     format!(
-        "{{\"asset\":\"{}\",\"label\":\"{}\"}}",
+        "{{\"asset\":\"{}\",\"label\":\"{}\"{}}}",
         json_escape(asset),
-        json_escape(label)
+        json_escape(label),
+        if remove { ",\"remove\":true" } else { "" }
     )
+}
+
+/// Split an `X-Immich-Tags` value into tag names.
+#[must_use]
+pub fn parse_tags(header: &str) -> Vec<String> {
+    header
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(percent_decode)
+        .collect()
+}
+
+/// Undo percent-encoding; a malformed escape stays as written.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(hi), Some(lo)) = (hex(hi), hex(lo))
+        {
+            // Two hex digits always fit a byte.
+            out.push(u8::try_from(hi * 16 + lo).unwrap_or(b'?'));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn json_escape(s: &str) -> String {
@@ -75,7 +114,7 @@ mod tests {
     #[test]
     fn label_body_escapes_quotes_and_backslashes() {
         assert_eq!(
-            label_body("0989ac28", "a \"b\" \\ c"),
+            label_body("0989ac28", "a \"b\" \\ c", false),
             r#"{"asset":"0989ac28","label":"a \"b\" \\ c"}"#
         );
     }
@@ -83,7 +122,7 @@ mod tests {
     #[test]
     fn label_body_escapes_control_characters() {
         assert_eq!(
-            label_body("x", "a\nb\u{1}"),
+            label_body("x", "a\nb\u{1}", false),
             r#"{"asset":"x","label":"a\nb\u0001"}"#
         );
     }
@@ -91,9 +130,32 @@ mod tests {
     #[test]
     fn label_body_keeps_non_ascii() {
         assert_eq!(
-            label_body("x", "Dovolená"),
+            label_body("x", "Dovolená", false),
             r#"{"asset":"x","label":"Dovolená"}"#
         );
+    }
+
+    #[test]
+    fn label_body_asks_for_removal() {
+        assert_eq!(
+            label_body("x", "Print", true),
+            r#"{"asset":"x","label":"Print","remove":true}"#
+        );
+    }
+
+    #[test]
+    fn parse_tags_decodes_each_tag() {
+        assert_eq!(
+            parse_tags("ToDelete,Dovolen%C3%A1,a%2Cb,Family%2FKids"),
+            ["ToDelete", "Dovolená", "a,b", "Family/Kids"]
+        );
+    }
+
+    #[test]
+    fn parse_tags_handles_empty_and_malformed() {
+        assert!(parse_tags("").is_empty());
+        assert!(parse_tags(" , ").is_empty());
+        assert_eq!(parse_tags("50%,%zz"), ["50%", "%zz"]);
     }
 
     #[test]
@@ -107,7 +169,7 @@ mod tests {
 #[cfg(target_arch = "wasm32")]
 mod wasm_glue {
     use super::manifest_params::{self, Sizing};
-    use super::{ASSET_HEADER, configured, label_body};
+    use super::{ASSET_HEADER, TAGS_HEADER, configured, label_body, parse_tags};
     use std::cell::{Cell, RefCell};
 
     use bmc_wasm_sdk::net::FetchRequest;
@@ -121,7 +183,7 @@ mod wasm_glue {
 
     /// Menu clears itself this long after opening, untouched.
     const MENU_AUTO_DISMISS_MS: u32 = 10_000;
-    /// How long a Label it outcome stays on screen.
+    /// How long a label change's outcome stays on screen.
     const NOTICE_MS: u32 = 3_000;
 
     const CONFIGURE_URL: &str = "Set a photo URL";
@@ -149,9 +211,13 @@ mod wasm_glue {
         /// Immich asset of the last photo fetched. A photo restored from flash
         /// after a restart has none until the next fetch.
         static ASSET: RefCell<Option<String>> = const { RefCell::new(None) };
-        /// A Label it request is on its way; further taps wait for it.
-        static LABELLING: Cell<bool> = const { Cell::new(false) };
-        /// Label it outcome on screen, and how long it stays (ms).
+        /// Immich tags of that asset, as the photo response listed them and
+        /// as this widget has changed them since.
+        static TAGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        /// The label change on its way (asset, label, remove); further taps
+        /// wait for it.
+        static PENDING: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
+        /// Label change outcome on screen, and how long it stays (ms).
         static NOTICE: RefCell<Option<String>> = const { RefCell::new(None) };
         static NOTICE_LEFT_MS: Cell<u32> = const { Cell::new(0) };
     }
@@ -245,9 +311,16 @@ mod wasm_glue {
     }
 
     fn on_image(_handle: &PollHandle, response: &FetchResponse) {
-        // The header is only readable inside this callback.
+        // The headers are only readable inside this callback.
         if response.ok() {
             ASSET.set(response.header(ASSET_HEADER).filter(|id| !id.is_empty()));
+            TAGS.set(
+                response
+                    .header(TAGS_HEADER)
+                    .as_deref()
+                    .map(parse_tags)
+                    .unwrap_or_default(),
+            );
         }
         dispatch(picture::classify_body(
             response,
@@ -274,6 +347,13 @@ mod wasm_glue {
         Some((label, url))
     }
 
+    /// Whether the photo on screen carries the configured label.
+    fn labelled() -> bool {
+        label_target().is_some_and(|(label, _)| {
+            ASSET.with_borrow(Option::is_some) && TAGS.with_borrow(|tags| tags.contains(&label))
+        })
+    }
+
     fn show_notice(message: String) {
         NOTICE.set(Some(message));
         NOTICE_LEFT_MS.with(|n| n.set(NOTICE_MS));
@@ -284,38 +364,65 @@ mod wasm_glue {
         let Some((label, url)) = label_target() else {
             return;
         };
-        if LABELLING.with(Cell::get) {
+        if PENDING.with_borrow(Option::is_some) {
             return;
         }
         let Some(asset) = ASSET.with_borrow(Clone::clone) else {
             show_notice("Reload the photo first".to_owned());
             return;
         };
-        let body = label_body(&asset, &label);
+        let remove = labelled();
+        let body = label_body(&asset, &label, remove);
         let sent = FetchRequest::post(&url)
             .headers("Content-Type: application/json")
             .body(body.as_bytes())
             .send(on_labelled);
         if sent.is_some() {
-            LABELLING.with(|l| l.set(true));
-            show_notice(fmt!("Labelling as {}…", label));
+            show_notice(if remove {
+                fmt!("Removing {}…", label)
+            } else {
+                fmt!("Labelling as {}…", label)
+            });
+            PENDING.set(Some((asset, label, remove)));
         } else {
-            show_notice("Label it failed".to_owned());
+            show_notice(failed_notice(remove).to_owned());
+        }
+    }
+
+    fn failed_notice(remove: bool) -> &'static str {
+        if remove {
+            "Remove label failed"
+        } else {
+            "Label it failed"
         }
     }
 
     fn on_labelled(response: &FetchResponse) {
-        LABELLING.with(|l| l.set(false));
-        if response.ok() {
-            let label = label_target().map(|(label, _)| label).unwrap_or_default();
-            show_notice(fmt!("Labelled {}", label));
-        } else {
+        let Some((asset, label, remove)) = PENDING.take() else {
+            return;
+        };
+        if !response.ok() {
             log_warn!(
-                "immich-photo: label not accepted by {}",
+                "immich-photo: label change not accepted by {}",
                 label_target().map(|(_, url)| url).unwrap_or_default()
             );
-            show_notice("Label it failed".to_owned());
+            show_notice(failed_notice(remove).to_owned());
+            return;
         }
+        // The photo may have moved on meanwhile; only its own tags change.
+        if ASSET.with_borrow(|a| a.as_deref() == Some(asset.as_str())) {
+            TAGS.with_borrow_mut(|tags| {
+                tags.retain(|t| *t != label);
+                if !remove {
+                    tags.push(label.clone());
+                }
+            });
+        }
+        show_notice(if remove {
+            fmt!("Removed {}", label)
+        } else {
+            fmt!("Labelled {}", label)
+        });
     }
 
     #[unsafe(no_mangle)]
@@ -341,6 +448,7 @@ mod wasm_glue {
             // A new source: the old photo's asset is no longer on screen.
             if prev.as_ref().is_some_and(|p| p.url != cur.url) {
                 ASSET.set(None);
+                TAGS.set(Vec::new());
             }
             dispatch(Event::TargetChanged);
         } else {
@@ -388,13 +496,14 @@ mod wasm_glue {
         )
     }
 
-    /// The reveal menu: Reload, Label it (only when a label is set up), Close.
-    fn menu_panel(with_label: bool) -> Node {
+    /// The reveal menu: Reload, the label button (only when a label is set up)
+    /// and Close. The label button reads Remove label once the photo has it.
+    fn menu_panel(label_button: Option<&'static str>) -> Node {
         let mut buttons = vec![
             button!(render::KEY_RELOAD, "Reload", style: Primary, icon: tree::ensure_registered(&ICON_RENEW)).stretch(),
         ];
-        if with_label {
-            buttons.push(button!(KEY_LABEL, "Label it", style: Secondary).stretch());
+        if let Some(caption) = label_button {
+            buttons.push(button!(KEY_LABEL, caption, style: Secondary).stretch());
         }
         buttons.push(button!(render::KEY_CLOSE, "Close", style: Secondary).stretch());
         center(
@@ -431,11 +540,15 @@ mod wasm_glue {
     }
 
     /// Overlay the tap catcher (always) and the menu (when open) onto the root.
-    fn with_interaction(mut root: Node, menu_open: bool, with_label: bool) -> Node {
+    fn with_interaction(
+        mut root: Node,
+        menu_open: bool,
+        label_button: Option<&'static str>,
+    ) -> Node {
         if let Node::Column(_, children) | Node::Row(_, children) = &mut root {
             children.push(tap_catcher());
             if menu_open {
-                children.push(menu_panel(with_label));
+                children.push(menu_panel(label_button));
             }
         }
         root
@@ -510,11 +623,17 @@ mod wasm_glue {
         }
 
         let open = menu_open();
-        let with_label = label_target().is_some();
+        let label_button = label_target().is_some().then(|| {
+            if labelled() {
+                "Remove label"
+            } else {
+                "Label it"
+            }
+        });
         let result = render_ui(
             size.width,
             size.height,
-            with_interaction(base, open, with_label),
+            with_interaction(base, open, label_button),
         );
 
         // Route taps: a button when the menu is open, otherwise open/dismiss it.
