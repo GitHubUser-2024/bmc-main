@@ -19,66 +19,63 @@
 // under any terms, and such a grant shall be considered distinct from
 // the grant above.
 
-//! Immich photo widget — the image widget's picture pipeline, plus a
-//! **Label it** menu button that tags the photo on screen in Immich, which
-//! turns into **Remove label** once the photo has that tag.
+//! Immich photo widget — random photos straight from an Immich server, with a
+//! **Label it** menu button that tags the photo on screen in Immich and turns
+//! into **Remove label** once the photo has that tag.
 //!
-//! The photo URL points at a helper in front of Immich (the widget can't send
-//! headers, so it can't hold an Immich key). The helper names each photo in an
-//! `X-Immich-Asset` response header and its tags in `X-Immich-Tags`; the menu
-//! button POSTs the id with the configured label as JSON to the label URL
-//! (`"remove": true` to take the tag off), and the helper updates Immich.
+//! The picture pipeline is the image widget's. The Immich API key lives in a
+//! credential slot: requests carry its placeholder and the device fills it in.
+//! Each refresh shows the next id of a small queue that `POST
+//! /api/search/random` keeps filled; labelling upserts the tag and adds or
+//! removes the photo.
 
 mod manifest_params;
 
-/// Response header naming the Immich asset a photo response carries.
-pub const ASSET_HEADER: &str = "X-Immich-Asset";
-/// Response header listing the asset's tags, each percent-encoded, comma-separated.
-pub const TAGS_HEADER: &str = "X-Immich-Tags";
+/// Random photos asked for at a time; the queue refills when it runs low.
+pub const QUEUE_BATCH: usize = 10;
+/// Immich's small thumbnail edge; larger widgets get the preview.
+pub const THUMBNAIL_PX: u32 = 250;
 
-/// The JSON body the menu button sends: `{"asset": …, "label": …}`, plus
-/// `"remove": true` when it takes the label off.
+/// `server` joined with an API path, without doubling the slash.
 #[must_use]
-pub fn label_body(asset: &str, label: &str, remove: bool) -> String {
-    format!(
-        "{{\"asset\":\"{}\",\"label\":\"{}\"{}}}",
-        json_escape(asset),
-        json_escape(label),
-        if remove { ",\"remove\":true" } else { "" }
-    )
+pub fn api_url(server: &str, path: &str) -> String {
+    format!("{}{}", server.trim_end_matches('/'), path)
 }
 
-/// Split an `X-Immich-Tags` value into tag names.
+/// The Immich thumbnail size that suits a widget of `width` × `height`.
 #[must_use]
-pub fn parse_tags(header: &str) -> Vec<String> {
-    header
-        .split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(percent_decode)
-        .collect()
-}
-
-/// Undo percent-encoding; a malformed escape stays as written.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = |b: u8| char::from(b).to_digit(16);
-        if bytes[i] == b'%'
-            && let (Some(&hi), Some(&lo)) = (bytes.get(i + 1), bytes.get(i + 2))
-            && let (Some(hi), Some(lo)) = (hex(hi), hex(lo))
-        {
-            // Two hex digits always fit a byte.
-            out.push(u8::try_from(hi * 16 + lo).unwrap_or(b'?'));
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
+pub fn thumbnail_size(width: u32, height: u32) -> &'static str {
+    if width.max(height) <= THUMBNAIL_PX {
+        "thumbnail"
+    } else {
+        "preview"
     }
-    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Body for `POST /api/search/random`: timeline photos only, so videos,
+/// archived and hidden assets stay out.
+#[must_use]
+pub fn random_body() -> String {
+    format!("{{\"size\":{QUEUE_BATCH},\"type\":\"IMAGE\",\"visibility\":\"timeline\"}}")
+}
+
+/// Body for `PUT /api/tags`, which creates the tag or returns the existing one.
+#[must_use]
+pub fn tag_body(label: &str) -> String {
+    format!("{{\"tags\":[\"{}\"]}}", json_escape(label))
+}
+
+/// Body for adding or removing one asset at `/api/tags/{id}/assets`.
+#[must_use]
+pub fn ids_body(asset: &str) -> String {
+    format!("{{\"ids\":[\"{}\"]}}", json_escape(asset))
+}
+
+/// Whether an Immich bulk-id result counts as done: a photo that already
+/// has the tag, or no longer has it, needs nothing more.
+#[must_use]
+pub fn bulk_done(success: Option<bool>, error: Option<&str>) -> bool {
+    success == Some(true) || matches!(error, Some("duplicate" | "not_found"))
 }
 
 fn json_escape(s: &str) -> String {
@@ -112,50 +109,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn label_body_escapes_quotes_and_backslashes() {
+    fn api_url_joins_with_one_slash() {
         assert_eq!(
-            label_body("0989ac28", "a \"b\" \\ c", false),
-            r#"{"asset":"0989ac28","label":"a \"b\" \\ c"}"#
+            api_url("http://h:2283", "/api/tags"),
+            "http://h:2283/api/tags"
         );
+        assert_eq!(api_url("https://h/", "/api/tags"), "https://h/api/tags");
     }
 
     #[test]
-    fn label_body_escapes_control_characters() {
-        assert_eq!(
-            label_body("x", "a\nb\u{1}", false),
-            r#"{"asset":"x","label":"a\nb\u0001"}"#
-        );
+    fn thumbnail_size_follows_the_widget() {
+        assert_eq!(thumbnail_size(250, 200), "thumbnail");
+        assert_eq!(thumbnail_size(317, 238), "preview");
     }
 
     #[test]
-    fn label_body_keeps_non_ascii() {
+    fn bodies_are_json() {
         assert_eq!(
-            label_body("x", "Dovolená", false),
-            r#"{"asset":"x","label":"Dovolená"}"#
+            random_body(),
+            r#"{"size":10,"type":"IMAGE","visibility":"timeline"}"#
         );
+        assert_eq!(tag_body("a \"b\" \\ c"), r#"{"tags":["a \"b\" \\ c"]}"#);
+        assert_eq!(tag_body("Dovolená\n"), r#"{"tags":["Dovolená\n"]}"#);
+        assert_eq!(ids_body("x\u{1}"), r#"{"ids":["x\u0001"]}"#);
     }
 
     #[test]
-    fn label_body_asks_for_removal() {
-        assert_eq!(
-            label_body("x", "Print", true),
-            r#"{"asset":"x","label":"Print","remove":true}"#
-        );
-    }
-
-    #[test]
-    fn parse_tags_decodes_each_tag() {
-        assert_eq!(
-            parse_tags("ToDelete,Dovolen%C3%A1,a%2Cb,Family%2FKids"),
-            ["ToDelete", "Dovolená", "a,b", "Family/Kids"]
-        );
-    }
-
-    #[test]
-    fn parse_tags_handles_empty_and_malformed() {
-        assert!(parse_tags("").is_empty());
-        assert!(parse_tags(" , ").is_empty());
-        assert_eq!(parse_tags("50%,%zz"), ["50%", "%zz"]);
+    fn bulk_done_accepts_no_ops() {
+        assert!(bulk_done(Some(true), None));
+        assert!(bulk_done(Some(false), Some("duplicate")));
+        assert!(bulk_done(Some(false), Some("not_found")));
+        assert!(!bulk_done(Some(false), Some("no_permission")));
+        assert!(!bulk_done(None, None));
     }
 
     #[test]
@@ -168,10 +153,12 @@ mod tests {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_glue {
-    use super::manifest_params::{self, Sizing};
-    use super::{ASSET_HEADER, TAGS_HEADER, configured, label_body, parse_tags};
+    use super::manifest_params::{self, Sizing, credentials};
+    use super::{api_url, bulk_done, configured, ids_body, random_body, tag_body, thumbnail_size};
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
 
+    use bmc_wasm_sdk::json::JsonDoc;
     use bmc_wasm_sdk::net::FetchRequest;
     #[expect(
         clippy::wildcard_imports,
@@ -185,8 +172,14 @@ mod wasm_glue {
     const MENU_AUTO_DISMISS_MS: u32 = 10_000;
     /// How long a label change's outcome stays on screen.
     const NOTICE_MS: u32 = 3_000;
+    /// Wait before asking Immich again after the photo list failed.
+    const REFILL_RETRY_MS: u32 = 30_000;
+    /// Refill once the queue is down to this many ids.
+    const QUEUE_LOW: usize = 2;
 
-    const CONFIGURE_URL: &str = "Set a photo URL";
+    const CONFIGURE_SERVER: &str = "Set the Immich address";
+    const CHECK_SETUP: &str = "Check the Immich address and API key";
+    const NO_PHOTOS: &str = "No photos in Immich";
     const KEY_LABEL: &str = "menu_label";
 
     const ICON_RENEW: Svg = include_svg!("assets/renew.svg");
@@ -194,6 +187,14 @@ mod wasm_glue {
     const MENU_GAP: f32 = 8.0;
     const MENU_PADDING: f32 = 12.0;
     const NOTICE_TEXT_SIZE: u32 = 14;
+
+    /// A label change in progress: one or two Immich requests.
+    #[derive(Clone)]
+    struct Pending {
+        asset: String,
+        label: String,
+        remove: bool,
+    }
 
     thread_local! {
         static VIEW: RefCell<View> = const { RefCell::new(View::Loading { decode: None }) };
@@ -208,15 +209,22 @@ mod wasm_glue {
         /// born dormant and `on_wake` always precedes the first frame, so a
         /// widget built for a scene nobody opens must not fetch a picture.
         static DORMANT: Cell<bool> = const { Cell::new(true) };
-        /// Immich asset of the last photo fetched. A photo restored from flash
+        /// Random asset ids still to show, and whether more are on the way.
+        static QUEUE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
+        static REFILLING: Cell<bool> = const { Cell::new(false) };
+        /// The poll found the queue empty and waits for the refill.
+        static STARVED: Cell<bool> = const { Cell::new(false) };
+        /// Asset the photo fetch in flight asked for.
+        static REQUESTED: RefCell<Option<String>> = const { RefCell::new(None) };
+        /// Immich asset of the photo on screen. A photo restored from flash
         /// after a restart has none until the next fetch.
         static ASSET: RefCell<Option<String>> = const { RefCell::new(None) };
-        /// Immich tags of that asset, as the photo response listed them and
-        /// as this widget has changed them since.
+        /// Immich tags of that asset, as fetched and as changed since.
         static TAGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-        /// The label change on its way (asset, label, remove); further taps
-        /// wait for it.
-        static PENDING: RefCell<Option<(String, String, bool)>> = const { RefCell::new(None) };
+        /// Why no photo comes, shown while there's nothing else to show.
+        static PROBLEM: Cell<Option<&'static str>> = const { Cell::new(None) };
+        /// The label change on its way; further taps wait for it.
+        static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
         /// Label change outcome on screen, and how long it stays (ms).
         static NOTICE: RefCell<Option<String>> = const { RefCell::new(None) };
         static NOTICE_LEFT_MS: Cell<u32> = const { Cell::new(0) };
@@ -286,23 +294,104 @@ mod wasm_glue {
         }
     }
 
-    // {{width}}/{{height}} expand to the viewport pixels.
-    fn expanded_url() -> Option<String> {
-        let size = widget_size();
-        let url = manifest_params::Params::current().url?;
-        machine::expand_url(&url, size.width, size.height)
+    fn server() -> Option<String> {
+        configured(manifest_params::Params::current().server.as_deref()).map(str::to_owned)
     }
 
-    // Cache identity: expanded URL + fit, so a URL/viewport/sizing change is a distinct blob.
+    fn label() -> Option<String> {
+        configured(manifest_params::Params::current().label.as_deref()).map(str::to_owned)
+    }
+
+    fn key_header() -> String {
+        fmt!("x-api-key: {}", credentials::immich::TOKEN)
+    }
+
+    fn json_headers() -> String {
+        fmt!(
+            "x-api-key: {}\nContent-Type: application/json",
+            credentials::immich::TOKEN
+        )
+    }
+
+    // Cache identity: server + viewport + fit, so a change of any is a distinct blob.
     fn cache_identity() -> Option<String> {
-        let mut id = expanded_url()?;
-        id.push('\u{1f}');
-        id.push_str(fit().identity_token());
-        Some(id)
+        let size = widget_size();
+        Some(fmt!(
+            "{}\u{1f}{}x{}\u{1f}{}",
+            server()?,
+            size.width,
+            size.height,
+            fit().identity_token()
+        ))
+    }
+
+    /// Ask Immich for the next batch of random photos, unless already asking.
+    fn refill() {
+        let Some(server) = server() else {
+            return;
+        };
+        if REFILLING.with(Cell::get) {
+            return;
+        }
+        let url = api_url(&server, "/api/search/random");
+        let body = random_body();
+        let sent = FetchRequest::post(&url)
+            .headers(&json_headers())
+            .body(body.as_bytes())
+            .send(on_refilled);
+        REFILLING.with(|r| r.set(sent.is_some()));
+    }
+
+    fn on_refilled(response: &FetchResponse) {
+        REFILLING.with(|r| r.set(false));
+        let ids: Option<Vec<String>> = response.ok().then(|| {
+            let doc = JsonDoc::parse(response.body());
+            (0..doc.len("").unwrap_or(0))
+                .filter_map(|i| doc.str(&fmt!("/{}/id", i)))
+                .collect()
+        });
+        match ids {
+            Some(ids) if !ids.is_empty() => {
+                PROBLEM.with(|p| p.set(None));
+                QUEUE.with_borrow_mut(|q| q.extend(ids));
+                // The poll skipped its turn for want of an id; take it now.
+                if STARVED.with(|s| s.replace(false)) {
+                    with_poll(PollHandle::invalidate);
+                }
+            }
+            Some(_) => PROBLEM.with(|p| p.set(Some(NO_PHOTOS))),
+            None => {
+                log_warn!("immich-photo: photo list refused or failed");
+                PROBLEM.with(|p| p.set(Some(CHECK_SETUP)));
+                if STARVED.with(|s| s.replace(false)) {
+                    with_poll(|h| h.retry_after(REFILL_RETRY_MS));
+                }
+            }
+        }
+        request_frame();
     }
 
     fn build_request(_handle: &PollHandle) -> Option<FetchSpec> {
-        expanded_url().map(|url| FetchSpec::get(url).host_body())
+        let server = server()?;
+        let next = QUEUE.with_borrow_mut(VecDeque::pop_front);
+        if QUEUE.with_borrow(VecDeque::len) <= QUEUE_LOW {
+            refill();
+        }
+        let Some(asset) = next else {
+            STARVED.with(|s| s.set(true));
+            return None;
+        };
+        let size = widget_size();
+        let url = api_url(
+            &server,
+            &fmt!(
+                "/api/assets/{}/thumbnail?size={}",
+                asset,
+                thumbnail_size(size.width, size.height)
+            ),
+        );
+        REQUESTED.set(Some(asset));
+        Some(FetchSpec::get(url).headers(key_header()).host_body())
     }
 
     /// Bring back whichever picture is on flash. Render scope only.
@@ -311,16 +400,13 @@ mod wasm_glue {
     }
 
     fn on_image(_handle: &PollHandle, response: &FetchResponse) {
-        // The headers are only readable inside this callback.
+        let requested = REQUESTED.take();
         if response.ok() {
-            ASSET.set(response.header(ASSET_HEADER).filter(|id| !id.is_empty()));
-            TAGS.set(
-                response
-                    .header(TAGS_HEADER)
-                    .as_deref()
-                    .map(parse_tags)
-                    .unwrap_or_default(),
-            );
+            ASSET.set(requested.clone());
+            TAGS.set(Vec::new());
+            if let Some(asset) = requested {
+                fetch_tags(&asset);
+            }
         }
         dispatch(picture::classify_body(
             response,
@@ -339,17 +425,36 @@ mod wasm_glue {
         });
     }
 
-    /// The label and label URL, when both are set.
-    fn label_target() -> Option<(String, String)> {
-        let params = manifest_params::Params::current();
-        let label = configured(params.label.as_deref())?.to_owned();
-        let url = configured(params.label_url.as_deref())?.to_owned();
-        Some((label, url))
+    /// Learn the photo's tags, so the menu can offer Remove label.
+    fn fetch_tags(asset: &str) {
+        let Some(server) = server() else {
+            return;
+        };
+        let url = api_url(&server, &fmt!("/api/assets/{}", asset));
+        let _ = FetchRequest::get(&url)
+            .headers(&key_header())
+            .send(on_asset_info);
+    }
+
+    fn on_asset_info(response: &FetchResponse) {
+        if !response.ok() {
+            return;
+        }
+        let doc = JsonDoc::parse(response.body());
+        // Only the photo still on screen.
+        if doc.str("/id") != ASSET.with_borrow(Clone::clone) {
+            return;
+        }
+        let tags = (0..doc.len("/tags").unwrap_or(0))
+            .filter_map(|i| doc.str(&fmt!("/tags/{}/value", i)))
+            .collect();
+        TAGS.set(tags);
+        request_frame();
     }
 
     /// Whether the photo on screen carries the configured label.
     fn labelled() -> bool {
-        label_target().is_some_and(|(label, _)| {
+        label().is_some_and(|label| {
             ASSET.with_borrow(Option::is_some) && TAGS.with_borrow(|tags| tags.contains(&label))
         })
     }
@@ -360,8 +465,18 @@ mod wasm_glue {
         request_frame();
     }
 
+    fn failed_notice(remove: bool) -> &'static str {
+        if remove {
+            "Remove label failed"
+        } else {
+            "Label it failed"
+        }
+    }
+
+    /// Start a label change: upsert the tag and add the photo, or look the
+    /// tag up and take the photo out.
     fn send_label() {
-        let Some((label, url)) = label_target() else {
+        let (Some(label), Some(server)) = (label(), server()) else {
             return;
         };
         if PENDING.with_borrow(Option::is_some) {
@@ -372,40 +487,107 @@ mod wasm_glue {
             return;
         };
         let remove = labelled();
-        let body = label_body(&asset, &label, remove);
-        let sent = FetchRequest::post(&url)
-            .headers("Content-Type: application/json")
-            .body(body.as_bytes())
-            .send(on_labelled);
-        if sent.is_some() {
-            show_notice(if remove {
-                fmt!("Removing {}…", label)
-            } else {
-                fmt!("Labelling as {}…", label)
-            });
-            PENDING.set(Some((asset, label, remove)));
+        let url = api_url(&server, "/api/tags");
+        let sent = if remove {
+            FetchRequest::get(&url)
+                .headers(&key_header())
+                .send(on_tags_listed)
         } else {
+            let body = tag_body(&label);
+            FetchRequest::put(&url)
+                .headers(&json_headers())
+                .body(body.as_bytes())
+                .send(on_tag_upserted)
+        };
+        if sent.is_none() {
             show_notice(failed_notice(remove).to_owned());
+            return;
         }
-    }
-
-    fn failed_notice(remove: bool) -> &'static str {
-        if remove {
-            "Remove label failed"
+        show_notice(if remove {
+            fmt!("Removing {}…", label)
         } else {
-            "Label it failed"
-        }
+            fmt!("Labelling as {}…", label)
+        });
+        PENDING.set(Some(Pending {
+            asset,
+            label,
+            remove,
+        }));
     }
 
-    fn on_labelled(response: &FetchResponse) {
-        let Some((asset, label, remove)) = PENDING.take() else {
+    /// Add or remove the pending photo at the tag `tag_id`.
+    fn change_tag_assets(tag_id: &str) {
+        let (Some(pending), Some(server)) = (PENDING.with_borrow(Clone::clone), server()) else {
+            finish(false);
             return;
         };
+        let url = api_url(&server, &fmt!("/api/tags/{}/assets", tag_id));
+        let body = ids_body(&pending.asset);
+        let headers = json_headers();
+        let request = if pending.remove {
+            FetchRequest::delete(&url)
+        } else {
+            FetchRequest::put(&url)
+        };
+        if request
+            .headers(&headers)
+            .body(body.as_bytes())
+            .send(on_tag_changed)
+            .is_none()
+        {
+            finish(false);
+        }
+    }
+
+    fn on_tag_upserted(response: &FetchResponse) {
+        match response
+            .ok()
+            .then(|| JsonDoc::parse(response.body()).str("/0/id"))
+            .flatten()
+        {
+            Some(tag_id) => change_tag_assets(&tag_id),
+            None => finish(false),
+        }
+    }
+
+    fn on_tags_listed(response: &FetchResponse) {
         if !response.ok() {
-            log_warn!(
-                "immich-photo: label change not accepted by {}",
-                label_target().map(|(_, url)| url).unwrap_or_default()
-            );
+            finish(false);
+            return;
+        }
+        let Some(label) = PENDING.with_borrow(|p| p.as_ref().map(|p| p.label.clone())) else {
+            return;
+        };
+        let doc = JsonDoc::parse(response.body());
+        let tag_id = (0..doc.len("").unwrap_or(0))
+            .find(|i| doc.str(&fmt!("/{}/value", i)).as_deref() == Some(label.as_str()))
+            .and_then(|i| doc.str(&fmt!("/{}/id", i)));
+        match tag_id {
+            Some(tag_id) => change_tag_assets(&tag_id),
+            // No such tag: the photo doesn't have it, nothing to remove.
+            None => finish(true),
+        }
+    }
+
+    fn on_tag_changed(response: &FetchResponse) {
+        let done = response.ok() && {
+            let doc = JsonDoc::parse(response.body());
+            bulk_done(doc.bool("/0/success"), doc.str("/0/error").as_deref())
+        };
+        finish(done);
+    }
+
+    fn finish(ok: bool) {
+        let Some(Pending {
+            asset,
+            label,
+            remove,
+        }) = PENDING.take()
+        else {
+            return;
+        };
+        if !ok {
+            log_warn!("immich-photo: label change on {} failed", asset);
             show_notice(failed_notice(remove).to_owned());
             return;
         }
@@ -443,12 +625,14 @@ mod wasm_glue {
         }
         if prev
             .as_ref()
-            .is_none_or(|p| p.url != cur.url || p.sizing != cur.sizing)
+            .is_none_or(|p| p.server != cur.server || p.sizing != cur.sizing)
         {
-            // A new source: the old photo's asset is no longer on screen.
-            if prev.as_ref().is_some_and(|p| p.url != cur.url) {
+            // A new server: forget the old one's photos.
+            if prev.as_ref().is_some_and(|p| p.server != cur.server) {
+                QUEUE.with_borrow_mut(VecDeque::clear);
                 ASSET.set(None);
                 TAGS.set(Vec::new());
+                PROBLEM.with(|p| p.set(None));
             }
             dispatch(Event::TargetChanged);
         } else {
@@ -580,13 +764,8 @@ mod wasm_glue {
 
         let size = widget_size();
         let shape = widget_viewport().shape;
-        let params = manifest_params::Params::current();
-        let mut base = if params
-            .url
-            .as_deref()
-            .is_none_or(|url| url.trim().is_empty())
-        {
-            render::message_view(CONFIGURE_URL, size)
+        let mut base = if server().is_none() {
+            render::message_view(CONFIGURE_SERVER, size)
         } else {
             VIEW.with(|v| match &*v.borrow() {
                 View::Shown {
@@ -614,7 +793,9 @@ mod wasm_glue {
                         Badge::Fresh => view,
                     }
                 }
-                View::Loading { .. } => render::message_view(render::LOADING, size),
+                View::Loading { .. } => {
+                    render::message_view(PROBLEM.with(Cell::get).unwrap_or(render::LOADING), size)
+                }
                 View::Failed(kind) => render::message_view(render::error_message(*kind), size),
             })
         };
@@ -623,7 +804,7 @@ mod wasm_glue {
         }
 
         let open = menu_open();
-        let label_button = label_target().is_some().then(|| {
+        let label_button = label().is_some().then(|| {
             if labelled() {
                 "Remove label"
             } else {

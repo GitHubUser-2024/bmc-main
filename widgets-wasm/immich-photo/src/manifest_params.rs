@@ -46,10 +46,9 @@ bmc_wasm_sdk::impl_manifest_str_enum!(Sizing);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
     pub label: Option<String>,
-    pub label_url: Option<String>,
     pub refresh_seconds: i32,
+    pub server: Option<String>,
     pub sizing: Sizing,
-    pub url: Option<String>,
 }
 impl Params {
     /// Materialise a typed snapshot from a dynamic [`snapshot::Params`].
@@ -57,10 +56,9 @@ impl Params {
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
             label: <String as ParamRead>::read_optional(snap, "label"),
-            label_url: <String as ParamRead>::read_optional(snap, "label_url"),
             refresh_seconds: <i32 as ParamRead>::read_required(snap, "refresh_seconds"),
+            server: <String as ParamRead>::read_optional(snap, "server"),
             sizing: <Sizing as ParamRead>::read_required(snap, "sizing"),
-            url: <String as ParamRead>::read_optional(snap, "url"),
         }
     }
     /// Latest typed snapshot delivered for this widget instance.
@@ -109,18 +107,25 @@ impl Params {
         if self.label != other.label {
             out.push("label");
         }
-        if self.label_url != other.label_url {
-            out.push("label_url");
-        }
         if self.refresh_seconds != other.refresh_seconds {
             out.push("refresh_seconds");
+        }
+        if self.server != other.server {
+            out.push("server");
         }
         if self.sizing != other.sizing {
             out.push("sizing");
         }
-        if self.url != other.url {
-            out.push("url");
-        }
         out
+    }
+}
+/// Credential slots this widget declares, one module per slot.
+pub mod credentials {
+    ///Immich API key — a `generic-token` account. Required — the widget cannot work until an account is bound.
+    ///
+    ///API key from Immich → Account Settings → API Keys
+    pub mod immich {
+        ///Placeholder for this slot's `token` field.
+        pub const TOKEN: &str = "{{ credential.immich.token }}";
     }
 }
