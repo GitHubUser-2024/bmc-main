@@ -1,0 +1,60 @@
+{
+  "$schema": "../../bmc-widget-manifest/manifest.schema.json",
+  "uid": "ebe1e87c-6f40-404f-aa1d-9407167915a0",
+  "version": "0.1.0",
+  "name": "Immich photo",
+  "description": "Show a photo from an Immich library and label it from the Deck",
+  "config_help": "Shows a photo served by a small helper in front of an Immich library, fitted to the widget.\n\n**Photo URL:** the helper's photo address. Put `{{width}}` and `{{height}}` in it and they're replaced with the widget's pixel size, e.g. `http://server/deck-photo?w={{width}}&h={{height}}`. Each refresh can bring a different photo.\n\n**Label it:** tap the photo and choose **Label it** to tag the photo on screen in Immich with the label set below. The helper names the photo in an `X-Immich-Asset` response header and receives the label as a JSON POST (`{\"asset\": …, \"label\": …}`) at the label URL. The button only shows when both the label and the label URL are set.",
+  "binary": "bin/immich_photo",
+  "icon": "assets/icon.svg",
+  "category": "media",
+  "supported_viewports": [
+    {
+      "type": "rectangular"
+    }
+  ],
+  "params": {
+    "url": {
+      "name": "Photo URL",
+      "description": "URL the photos are fetched from",
+      "type": "string",
+      "optional": true
+    },
+    "refresh_seconds": {
+      "name": "Refresh interval (seconds)",
+      "description": "How often to fetch the next photo",
+      "type": "integer",
+      "min": 300,
+      "default_value": 3600
+    },
+    "sizing": {
+      "name": "Sizing",
+      "description": "Fit the whole photo (letterboxed), or fill the widget and crop the overflow",
+      "type": "string",
+      "default_value": "contain",
+      "enum_values": [
+        {
+          "value": "contain",
+          "label": "Fit — whole photo"
+        },
+        {
+          "value": "cover",
+          "label": "Fill — crop to edges"
+        }
+      ],
+      "enum_control": "radio"
+    },
+    "label": {
+      "name": "Label",
+      "description": "Tag given to the photo on screen by Label it, e.g. Favourite",
+      "type": "string",
+      "optional": true
+    },
+    "label_url": {
+      "name": "Label URL",
+      "description": "Where Label it sends the label, e.g. http://server/deck-photo/label",
+      "type": "string",
+      "optional": true
+    }
+  }
+}
