@@ -5,7 +5,7 @@
   "name": "Immich photo",
   "description": "Show a photo from an Immich library and label it from the Deck",
   "config_help": "Shows a photo served by a small helper in front of an Immich library, fitted to the widget.\n\n**Photo URL:** the helper's photo address. Put `{{width}}` and `{{height}}` in it and they're replaced with the widget's pixel size, e.g. `http://server/deck-photo?w={{width}}&h={{height}}`. Each refresh can bring a different photo.\n\n**Label it:** tap the photo and choose **Label it** to tag the photo on screen in Immich with the label set below. The helper names the photo in an `X-Immich-Asset` response header and receives the label as a JSON POST (`{\"asset\": …, \"label\": …}`) at the label URL. The button only shows when both the label and the label URL are set.",
-  "binary": "bin/immich_photo",
+  "binary": "bin/immich-photo",
   "icon": "assets/icon.svg",
   "category": "media",
   "supported_viewports": [
