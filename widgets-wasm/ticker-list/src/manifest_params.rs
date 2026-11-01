@@ -54,6 +54,7 @@ bmc_wasm_sdk::impl_manifest_str_enum!(Period);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Params {
     pub period: Period,
+    pub precision: Option<i32>,
     pub symbol_1: Option<String>,
     pub symbol_2: Option<String>,
     pub symbol_3: Option<String>,
@@ -69,6 +70,7 @@ impl Params {
     pub fn from_snapshot(snap: &snapshot::Params) -> Self {
         Self {
             period: <Period as ParamRead>::read_required(snap, "period"),
+            precision: <i32 as ParamRead>::read_optional(snap, "precision"),
             symbol_1: <String as ParamRead>::read_optional(snap, "symbol_1"),
             symbol_2: <String as ParamRead>::read_optional(snap, "symbol_2"),
             symbol_3: <String as ParamRead>::read_optional(snap, "symbol_3"),
@@ -124,6 +126,9 @@ impl Params {
         let mut out = Vec::new();
         if self.period != other.period {
             out.push("period");
+        }
+        if self.precision != other.precision {
+            out.push("precision");
         }
         if self.symbol_1 != other.symbol_1 {
             out.push("symbol_1");

@@ -599,6 +599,8 @@ mod wasm_glue {
         });
         let period_changed = prev.as_ref().is_none_or(|p| p.period != cur.period);
         let changed = symbols_changed || period_changed;
+        // A precision-only edit redraws the held prices; nothing refetches.
+        let decimals_changed = prev.as_ref().is_none_or(|p| p.precision != cur.precision);
 
         if changed {
             let changed_rows = if symbols_changed {
@@ -630,7 +632,7 @@ mod wasm_glue {
                 }
             });
         }
-        if changed {
+        if changed || decimals_changed {
             request_frame();
         }
     }
@@ -659,9 +661,22 @@ mod wasm_glue {
                 })
                 .collect()
         });
+        // One precision for the whole list: every row takes the same.
+        let decimals =
+            [prices::format::chosen_decimals(manifest_params::Params::current().precision);
+                symbols::MAX_SYMBOLS];
         let node = SYMBOLS.with(|sym| {
             STATES.with(|st| {
-                NAMES.with(|nm| render::view(&sym.borrow(), &st.borrow(), &nm.borrow(), &stale, ws))
+                NAMES.with(|nm| {
+                    render::view(
+                        &sym.borrow(),
+                        &st.borrow(),
+                        &nm.borrow(),
+                        &stale,
+                        &decimals,
+                        ws,
+                    )
+                })
             })
         });
         let _ = render_ui(ws.width, ws.height, node);

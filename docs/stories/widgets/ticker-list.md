@@ -46,6 +46,8 @@ fetched independently so one bad symbol never blanks the others.
 - The price is formatted with as many decimals as its magnitude warrants — none at 1000 and above, two at 1 and above,
   and progressively more for small values.
 - Currency pairs made of two fiat currencies below a rate of 1000 use five decimals, or three when quoted in JPY.
+- The *Precision* parameter (0 to 8) replaces that rule for every row's price with exactly that many decimals, so
+  `EUR-CZK` can read `24.31`. Changing it redraws the list without refetching.
 - Number grouping and the decimal separator follow the device localization setting.
 
 ### Choose the time period

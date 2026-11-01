@@ -65,6 +65,7 @@ mod tests {
         let [s1, s2, s3, s4, s5, s6, s7, s8] = slot_values.map(|s| Some(s.to_owned()));
         Params {
             period: Period::_7d,
+            precision: None,
             symbol_1: s1,
             symbol_2: s2,
             symbol_3: s3,
