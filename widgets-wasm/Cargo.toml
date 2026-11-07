@@ -17,6 +17,7 @@ members = [
     "blockheight",
     "braiins-pool",
     "clock",
+    "deck-music",
     "fleet-management",
     "formula-1",
     "halving-countdown",

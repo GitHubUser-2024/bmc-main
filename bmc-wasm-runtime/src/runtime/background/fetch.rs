@@ -198,6 +198,36 @@ pub(in crate::runtime) fn do_fetch(
     }
 }
 
+/// Open a GET whose body is read as it arrives, for media streams.
+///
+/// Only connecting and the response head are bounded (`timeout` each): a
+/// track takes minutes to play out, so the whole-call cap `do_fetch` uses
+/// would cut it off. The body has no size limit for the same reason; the
+/// reader is meant to be drained into a decoder, never collected.
+pub(in crate::runtime) fn open_stream(
+    agent: &FetchAgent,
+    url: &str,
+    headers: &[(String, String)],
+    timeout: Duration,
+) -> Result<ureq::BodyReader<'static>, String> {
+    let mut req = agent
+        .0
+        .get(url)
+        .config()
+        .timeout_connect(Some(timeout))
+        .timeout_recv_response(Some(timeout))
+        .build();
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    match req.call() {
+        // `into_reader` carries ureq's default limit, which is none.
+        Ok(response) if response.status().is_success() => Ok(response.into_body().into_reader()),
+        Ok(response) => Err(format!("HTTP {}", response.status().as_u16())),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;

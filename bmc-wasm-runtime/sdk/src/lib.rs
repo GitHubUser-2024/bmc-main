@@ -374,6 +374,7 @@ pub mod log;
 #[cfg(feature = "math-3d")]
 pub mod math;
 pub mod mdns;
+pub mod media;
 pub mod net;
 pub mod network;
 pub mod params;

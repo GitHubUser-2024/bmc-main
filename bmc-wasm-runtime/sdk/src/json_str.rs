@@ -36,38 +36,41 @@ use ufmt::{Formatter, uDisplay, uWrite};
 pub struct JsonStr<T>(pub T);
 
 impl<T: AsRef<str>> uDisplay for JsonStr<T> {
+    #[expect(
+        clippy::string_slice,
+        reason = "split only at ASCII bytes, never inside a UTF-8 sequence"
+    )]
     fn fmt<W: uWrite + ?Sized>(&self, f: &mut Formatter<'_, W>) -> Result<(), W::Error> {
-        for ch in self.0.as_ref().chars() {
-            match ch {
-                '"' => f.write_str("\\\"")?,
-                '\\' => f.write_str("\\\\")?,
-                '\n' => f.write_str("\\n")?,
-                '\r' => f.write_str("\\r")?,
-                '\t' => f.write_str("\\t")?,
-                '\u{0008}' => f.write_str("\\b")?,
-                '\u{000C}' => f.write_str("\\f")?,
-                c if (c as u32) < 0x20 => {
-                    let n = c as u32;
+        // Runs that need no escaping go out in one write: a write per
+        // character costs a widget its frame budget on long strings. Every
+        // byte that needs escaping is ASCII, so splitting at one never cuts
+        // a multi-byte UTF-8 sequence.
+        let text = self.0.as_ref();
+        let mut run_start = 0;
+        let mut buf = [b'\\', b'u', b'0', b'0', 0, 0];
+        for (i, byte) in text.bytes().enumerate() {
+            let escaped = match byte {
+                b'"' => "\\\"",
+                b'\\' => "\\\\",
+                b'\n' => "\\n",
+                b'\r' => "\\r",
+                b'\t' => "\\t",
+                0x08 => "\\b",
+                0x0C => "\\f",
+                0x00..=0x1F => {
                     let hex = b"0123456789abcdef";
-                    let buf = [
-                        b'\\',
-                        b'u',
-                        b'0',
-                        b'0',
-                        hex[((n >> 4) & 0xf) as usize],
-                        hex[(n & 0xf) as usize],
-                    ];
+                    buf[4] = hex[usize::from(byte >> 4)];
+                    buf[5] = hex[usize::from(byte & 0xf)];
                     // SAFETY: every byte was selected from the ASCII set above.
-                    let escaped = unsafe { core::str::from_utf8_unchecked(&buf) };
-                    f.write_str(escaped)?;
+                    unsafe { core::str::from_utf8_unchecked(&buf) }
                 }
-                c => {
-                    let mut utf8 = [0_u8; 4];
-                    f.write_str(c.encode_utf8(&mut utf8))?;
-                }
-            }
+                _ => continue,
+            };
+            f.write_str(&text[run_start..i])?;
+            f.write_str(escaped)?;
+            run_start = i + 1;
         }
-        Ok(())
+        f.write_str(&text[run_start..])
     }
 }
 
@@ -123,6 +126,15 @@ mod tests {
         // RFC 8259 only requires escaping U+0000..U+001F plus `"` and `\`.
         // U+007F (DEL) and above pass through.
         assert_eq!(render(JsonStr("\u{007F}")), "\u{007F}");
+    }
+
+    #[wasm_test]
+    fn escapes_between_plain_runs() {
+        assert_eq!(
+            render(JsonStr("Příliš \"žluťoučký\"\n🦀")),
+            r#"Příliš \"žluťoučký\"\n🦀"#
+        );
+        assert_eq!(render(JsonStr("")), "");
     }
 
     #[wasm_test]
