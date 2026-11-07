@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "name": "Deck Music",
   "subname": "Subsonic / Navidrome",
-  "description": "Music from a Subsonic server (Navidrome, Gonic, Airsonic, …) on the Deck's own speaker: random songs, favourites or a playlist, with shuffle, repeat, seek and volume. Keeps playing while another widget is on screen.",
+  "description": "Music from a Subsonic server (Navidrome, Gonic, …) on the Deck's own speaker: random songs, favourites or a playlist. Keeps playing while another widget is on screen.",
   "binary": "bin/deck-music",
   "icon": "assets/icon.svg",
   "category": "media",
