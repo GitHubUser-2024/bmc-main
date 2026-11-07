@@ -369,6 +369,7 @@ pub mod log;
 pub mod math;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod mdns;
+pub mod media;
 pub mod mesh;
 pub mod modal;
 #[cfg(any(target_arch = "wasm32", test))]

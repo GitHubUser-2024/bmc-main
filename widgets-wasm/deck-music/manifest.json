@@ -1,0 +1,91 @@
+{
+  "$schema": "../../bmc-widget-manifest/manifest.schema.json",
+  "uid": "fb380337-6563-4751-9dd1-57a2933d1349",
+  "version": "0.1.0",
+  "name": "Deck Music",
+  "subname": "Subsonic / Navidrome",
+  "description": "Music from a Subsonic server (Navidrome, Gonic, Airsonic, …) on the Deck's own speaker: random songs, favourites or a playlist, with shuffle, repeat, seek and volume. Keeps playing while another widget is on screen.",
+  "binary": "bin/deck-music",
+  "icon": "assets/icon.svg",
+  "category": "media",
+  "settings": [],
+  "supported_viewports": [
+    {
+      "type": "rectangular",
+      "min_width": 317,
+      "max_width": 1280,
+      "min_height": 238,
+      "max_height": 480
+    }
+  ],
+  "params": {
+    "subsonic_url": {
+      "name": "Music server",
+      "description": "Subsonic-compatible server (Navidrome, Gonic, Airsonic, …) to play from, e.g. https://music.example",
+      "type": "string",
+      "format": "uri",
+      "optional": true
+    },
+    "subsonic_user": {
+      "name": "Music server user",
+      "description": "Account on the music server",
+      "type": "string",
+      "optional": true
+    },
+    "subsonic_password": {
+      "name": "Music server password",
+      "description": "Password of that account",
+      "type": "string",
+      "format": "password",
+      "optional": true
+    },
+    "subsonic_source": {
+      "name": "Play",
+      "description": "Which songs the Deck queues",
+      "type": "string",
+      "default_value": "random",
+      "enum_values": [
+        {
+          "value": "random",
+          "label": "Random songs"
+        },
+        {
+          "value": "starred",
+          "label": "Favourites"
+        },
+        {
+          "value": "playlist",
+          "label": "Playlist"
+        }
+      ],
+      "enum_control": "radio"
+    },
+    "subsonic_playlist": {
+      "name": "Playlist",
+      "description": "Name of the playlist to play, when Play is Playlist",
+      "type": "string",
+      "optional": true
+    },
+    "max_bitrate": {
+      "name": "Max bitrate (kbit/s)",
+      "description": "The server converts anything above this, or not in MP3, to MP3 at this bitrate",
+      "type": "integer",
+      "default_value": 192,
+      "enum_values": [
+        {
+          "value": 128,
+          "label": "128"
+        },
+        {
+          "value": 192,
+          "label": "192"
+        },
+        {
+          "value": 320,
+          "label": "320"
+        }
+      ],
+      "enum_control": "radio"
+    }
+  }
+}

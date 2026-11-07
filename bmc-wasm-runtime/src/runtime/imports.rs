@@ -26,6 +26,7 @@ mod data;
 mod eviction;
 mod guards;
 mod led;
+mod media;
 mod network;
 pub(crate) mod params;
 mod render;
@@ -48,6 +49,7 @@ pub(super) fn register_host_functions(linker: &mut Linker<HostState>) -> Result<
     system::register(linker)?;
     audio::register(linker)?;
     led::register(linker)?;
+    media::register(linker)?;
     eviction::register(linker)?;
     params::register(linker)?;
     credentials::register(linker)?;

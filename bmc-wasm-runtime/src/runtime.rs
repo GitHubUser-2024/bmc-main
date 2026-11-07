@@ -25,6 +25,7 @@ mod background;
 mod delivery;
 mod fetch_logging;
 mod imports;
+mod media;
 mod memory;
 mod time;
 mod timers;
