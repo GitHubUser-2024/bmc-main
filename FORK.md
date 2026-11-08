@@ -72,12 +72,12 @@ APIs name what to delete in the body: Immich answered 400 when a tag was removed
 
 Branches: [`deck-music`](https://github.com/GitHubUser-2024/bmc-main/tree/deck-music),
 [`stable/deck-music`](https://github.com/GitHubUser-2024/bmc-main/tree/stable/deck-music)
-(the first of the two commits on top of Deck Music)
+(the first and third commits on top of Deck Music)
 
-- **Manifest flag:** a widget manifest can set `"holds_screen": true`. While a scene with
-  such a widget is showing, automatic scene cycling pauses there.
-- **Leaving still works:** swiping by hand still moves to another scene, and cycling carries
-  on from there. It pauses again when it reaches the holding scene.
+- **Manifest flag:** a widget manifest can set `"holds_screen": true`. Automatic scene
+  cycling skips a scene with such a widget; it is reached only by swiping to it.
+- **Stays put once there:** while that scene is showing, automatic cycling pauses. Swiping
+  to another scene resumes it.
 - **Night mode and settings untouched:** the hold is a separate gate next to the night-mode
   suspension and never changes the cycling settings. Firmware without this change ignores
   the flag, so a manifest that sets it still loads.
@@ -157,8 +157,8 @@ Branches: [`deck-music`](https://github.com/GitHubUser-2024/bmc-main/tree/deck-m
   random songs, favourites or a playlist. It shows the cover, title, artist and album, a
   seek bar, one symmetric row of round buttons (shuffle, previous, play/pause, next,
   repeat) and a volume row.
-- **Stays on screen:** the widget sets `holds_screen`, so automatic cycling stops on its
-  scene (see "Scene cycling" above).
+- **Out of the cycle:** the widget sets `holds_screen`, so automatic cycling skips its scene
+  and stays on it once you swipe there (see "Scene cycling" above).
 - **Cover in step with the song:** the old picture is dropped when the track changes, and
   only the answer to the request still wanted is shown. A late cover from a skipped song
   never appears.
