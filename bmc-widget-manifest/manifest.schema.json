@@ -47,6 +47,10 @@
       "type": "string",
       "maxLength": 200
     },
+    "holds_screen": {
+      "description": "Keep a scene showing this widget on screen: automatic scene cycling\npauses there until the user swipes to another scene. For widgets that\nare operated for a while, such as a music player. Defaults to `false`.",
+      "type": "boolean"
+    },
     "icon": {
       "description": "Optional icon path, relative to the widget dir or absolute. Served by BMC.",
       "type": [

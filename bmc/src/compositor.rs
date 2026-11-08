@@ -162,6 +162,9 @@ pub struct SceneLayout {
     /// Combined scenes are drawn with a separator grid between grid cells;
     /// fullscreen scenes are not. See the renderer's grid drawing.
     pub combined: bool,
+    /// A widget on this scene asks to stay on screen (`holds_screen` in its
+    /// manifest): automatic cycling pauses while this scene is active.
+    pub holds_screen: bool,
     pub widgets: Vec<WidgetPlacement>,
 }
 

@@ -1425,6 +1425,7 @@ mod tests {
             params: indexmap::IndexMap::new(),
             credentials: indexmap::IndexMap::new(),
             programs: bmc_widget_manifest::Programs::default(),
+            holds_screen: false,
         };
 
         test_widget_build(manifest, "/test/widgets/test-widget")

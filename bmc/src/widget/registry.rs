@@ -415,6 +415,7 @@ mod tests {
             params: indexmap::IndexMap::new(),
             credentials: indexmap::IndexMap::new(),
             programs: bmc_widget_manifest::Programs::default(),
+            holds_screen: false,
         };
 
         let widget_dir = PathBuf::from("/test/widgets").join(name);

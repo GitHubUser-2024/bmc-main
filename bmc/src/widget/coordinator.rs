@@ -230,10 +230,17 @@ fn scene_to_layout_with_registry(
         })
         .collect();
 
+    let holds_screen = scene.widgets.values().any(|widget| {
+        registry
+            .get(&widget.widget_type_id)
+            .is_some_and(|info| info.manifest.holds_screen)
+    });
+
     SceneLayout {
         scene_id: Some(scene.id),
         cycle_duration: scene.cycle_duration,
         combined: scene.kind == crate::scene::SceneKind::Combined,
+        holds_screen,
         widgets,
     }
 }
@@ -4294,6 +4301,7 @@ mod support_tests {
             params: indexmap::IndexMap::new(),
             credentials: indexmap::IndexMap::new(),
             programs: bmc_widget_manifest::Programs::default(),
+            holds_screen: false,
         };
         WidgetRegistry::new(vec![WidgetInfo::for_test(
             manifest,
@@ -4415,6 +4423,31 @@ mod support_tests {
             vec![spawnable_instance_id.expect("BUG: registered widget was inserted")],
             "layout must keep only widgets the spawner can launch",
         );
+    }
+
+    #[test]
+    fn layout_holds_the_screen_when_a_widget_manifest_asks() {
+        let widget_type_id = Uuid::new_v4();
+        let constraint = WidgetViewportConstraint {
+            viewport_shape: ViewportShape::Rectangular,
+            min_width: Some(1_280),
+            max_width: Some(1_280),
+            min_height: Some(480),
+            max_height: Some(480),
+            min_dpi: None,
+            max_dpi: None,
+        };
+        let registry = registry_with_widget(widget_type_id, constraint);
+        let scene = fullscreen_scene_with(widget_type_id, ViewportShape::Rectangular);
+        let deck = caps(None, 1_280, 480, DisplayShape::Rectangular);
+        assert!(!scene_to_layout_with_registry(&registry, &deck, &scene).holds_screen);
+
+        let mut info = registry
+            .get(&widget_type_id)
+            .expect("BUG: test widget is registered");
+        info.manifest.holds_screen = true;
+        registry.replace(info);
+        assert!(scene_to_layout_with_registry(&registry, &deck, &scene).holds_screen);
     }
 
     #[test]

@@ -53,6 +53,7 @@ pub(crate) fn widget_manifest(
         params: IndexMap::new(),
         credentials: IndexMap::new(),
         programs: Programs::default(),
+        holds_screen: false,
     }
 }
 

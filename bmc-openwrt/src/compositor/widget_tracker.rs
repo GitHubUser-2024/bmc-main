@@ -708,6 +708,7 @@ mod tests {
             scene_id: None,
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: vec![WidgetPlacement {
                 instance_id: id.to_owned(),
                 position: Position { x: 0, y: 0 },
@@ -933,6 +934,7 @@ mod tests {
             scene_id: Some(id),
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: vec![],
         }
     }
@@ -942,6 +944,7 @@ mod tests {
             scene_id: Some(id),
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: widgets
                 .iter()
                 .map(|(instance_id, visible)| WidgetPlacement {
