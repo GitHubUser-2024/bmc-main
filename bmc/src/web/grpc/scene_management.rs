@@ -2859,6 +2859,7 @@ mod tests {
             }],
             params,
             credentials: indexmap::IndexMap::new(),
+            holds_screen: false,
         }
     }
 
@@ -2900,6 +2901,7 @@ mod tests {
             }],
             params,
             credentials: indexmap::IndexMap::new(),
+            holds_screen: false,
         }
     }
 
@@ -4267,6 +4269,7 @@ mod tests {
             }],
             params: indexmap::IndexMap::new(),
             credentials: indexmap::IndexMap::new(),
+            holds_screen: false,
         };
         let widget_registry = Arc::new(WidgetRegistry::new(vec![
             crate::widget::WidgetInfo::for_test(

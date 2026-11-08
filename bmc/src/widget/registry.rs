@@ -370,6 +370,7 @@ mod tests {
             supported_viewports: viewports,
             params: indexmap::IndexMap::new(),
             credentials: indexmap::IndexMap::new(),
+            holds_screen: false,
         };
 
         let widget_dir = PathBuf::from("/test/widgets").join(name);

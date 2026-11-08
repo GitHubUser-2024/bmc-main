@@ -1099,7 +1099,14 @@ impl AppState {
             .unwrap_or(self.automatic_cycling.default_duration())
     }
 
+    /// Hold automatic cycling on a scene that holds the screen.
+    fn sync_automatic_cycling_hold(&mut self) {
+        let held = self.compositor.widgets.active_scene().holds_screen;
+        self.automatic_cycling.set_held(held);
+    }
+
     fn reevaluate_automatic_cycling(&mut self, now: Instant) {
+        self.sync_automatic_cycling_hold();
         let transition_was_active = matches!(
             self.automatic_cycling.phase(),
             AutomaticCyclingPhase::PreTransition { .. } | AutomaticCyclingPhase::Transition { .. }
@@ -1185,6 +1192,7 @@ impl AppState {
 
     fn reset_automatic_waiting(&mut self, now: Instant) {
         self.cancel_automatic_transition_for_interruption();
+        self.sync_automatic_cycling_hold();
         self.automatic_cycling.reset_waiting(
             now,
             self.compositor.widgets.scene_count(),
@@ -1195,6 +1203,7 @@ impl AppState {
 
     fn pause_automatic_cycling_for_touch(&mut self, now: Instant) {
         self.cancel_automatic_transition_for_interruption();
+        self.sync_automatic_cycling_hold();
         self.automatic_cycling.reevaluate(
             now,
             self.compositor.widgets.can_drag(),
@@ -3369,6 +3378,7 @@ mod tests {
             scene_id: None,
             cycle_duration: None,
             combined: instance_ids.len() > 1,
+            holds_screen: false,
             widgets: instance_ids
                 .iter()
                 .map(|instance_id| WidgetPlacement {
@@ -3389,6 +3399,7 @@ mod tests {
             scene_id: None,
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: vec![WidgetPlacement {
                 instance_id: instance_id.to_owned(),
                 position: Position { x: 0, y: 0 },
@@ -4129,6 +4140,35 @@ mod tests {
         assert_eq!(state.active_scene_cycle_duration(), duration);
     }
 
+    #[test]
+    fn a_scene_that_holds_the_screen_stops_automatic_cycling() {
+        let mut state = make_app_state();
+        let now = Instant::now();
+        state.compositor.widgets.set_scene_cycling(vec![
+            SceneLayout {
+                holds_screen: true,
+                ..test_scene("music")
+            },
+            test_scene("b"),
+        ]);
+        state.reset_automatic_waiting(now);
+        assert!(matches!(
+            state.automatic_cycling.phase(),
+            AutomaticCyclingPhase::PausedDisabled { .. }
+        ));
+
+        // The same scenes with a non-holding one active: cycling runs again.
+        state
+            .compositor
+            .widgets
+            .set_scene_cycling(vec![test_scene("b"), test_scene("c")]);
+        state.reset_automatic_waiting(now);
+        assert!(matches!(
+            state.automatic_cycling.phase(),
+            AutomaticCyclingPhase::WaitingForTimer { .. }
+        ));
+    }
+
     /// Records `send`/`release_buffers`/`flush` calls in order. `send`
     /// and `release_buffers` return a synthetic per-instance `ClientId`
     /// so the test can verify that the flush boundary between batches
@@ -4252,6 +4292,7 @@ mod tests {
             scene_id: None,
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: vec![
                 WidgetPlacement {
                     instance_id: String::from("visible"),

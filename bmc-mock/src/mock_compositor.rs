@@ -598,6 +598,7 @@ mod tests {
             scene_id: Some(id),
             cycle_duration: None,
             combined: false,
+            holds_screen: false,
             widgets: widgets
                 .iter()
                 .map(|(instance_id, visible)| WidgetPlacement {

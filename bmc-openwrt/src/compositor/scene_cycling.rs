@@ -88,6 +88,11 @@ pub(crate) struct AutomaticCycling {
     /// and night mode can start while the panel is still lit — so the caller has
     /// to undo a slide that is already running.
     suspended: bool,
+    /// The active scene holds the screen (a widget on it asked to stay on
+    /// screen). Like `suspended` it stops the timer without touching the
+    /// configuration; the caller sets it from the active scene before every
+    /// re-evaluation, so a manual swipe away lifts it.
+    held: bool,
 }
 
 impl AutomaticCycling {
@@ -97,11 +102,16 @@ impl AutomaticCycling {
             pending_config: None,
             phase: AutomaticCyclingPhase::PausedDisabled { started_at },
             suspended: false,
+            held: false,
         }
     }
 
     pub(crate) fn set_suspended(&mut self, suspended: bool) {
         self.suspended = suspended;
+    }
+
+    pub(crate) fn set_held(&mut self, held: bool) {
+        self.held = held;
     }
 
     pub(crate) fn phase(&self) -> AutomaticCyclingPhase {
@@ -149,6 +159,7 @@ impl AutomaticCycling {
         touch_active: bool,
     ) {
         if self.suspended
+            || self.held
             || !self.config.enabled
             || !has_cycleable_scenes
             || scene_count < 2
@@ -167,7 +178,8 @@ impl AutomaticCycling {
         if let Some(config) = self.pending_config.take() {
             self.config = config;
         }
-        if !self.suspended && self.config.enabled && scene_count >= 2 && !touch_active {
+        if !self.suspended && !self.held && self.config.enabled && scene_count >= 2 && !touch_active
+        {
             self.phase = AutomaticCyclingPhase::WaitingForTimer { started_at: now };
         } else {
             self.phase = AutomaticCyclingPhase::PausedDisabled { started_at: now };
@@ -513,6 +525,50 @@ mod tests {
             Some(Duration::from_secs(30)),
             "waiting must restart from resume, not from before the suspend"
         );
+    }
+
+    #[test]
+    fn a_held_scene_pauses_and_leaving_it_restarts_waiting() {
+        let now = Instant::now();
+        let mut state = AutomaticCycling::new(now, cycling_config(true));
+        state.reevaluate(now, true, 2, false);
+
+        // A scene that holds the screen becomes active: no timer.
+        state.set_held(true);
+        state.reset_waiting(now, 2, false);
+        assert!(matches!(
+            state.phase(),
+            AutomaticCyclingPhase::PausedDisabled { .. }
+        ));
+        assert_eq!(state.next_delay(now, Duration::from_secs(30)), None);
+        state.reevaluate(now, true, 2, false);
+        assert!(matches!(
+            state.phase(),
+            AutomaticCyclingPhase::PausedDisabled { .. }
+        ));
+
+        // Swiped to a scene that does not hold: a fresh waiting period.
+        state.set_held(false);
+        let later = now + Duration::from_mins(10);
+        state.reset_waiting(later, 2, false);
+        assert_eq!(
+            state.next_delay(later, Duration::from_secs(30)),
+            Some(Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn lifting_the_hold_keeps_the_night_mode_suspension() {
+        let now = Instant::now();
+        let mut state = AutomaticCycling::new(now, cycling_config(true));
+        state.set_suspended(true);
+        state.set_held(true);
+        state.set_held(false);
+        state.reevaluate(now, true, 2, false);
+        assert!(matches!(
+            state.phase(),
+            AutomaticCyclingPhase::PausedDisabled { .. }
+        ));
     }
 
     #[test]

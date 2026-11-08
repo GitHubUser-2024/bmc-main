@@ -190,6 +190,8 @@ struct RawManifest {
     params: IndexMap<ParamKey, ParamDefinition>,
     #[serde(default, deserialize_with = "deserialize_unique_credentials")]
     credentials: IndexMap<CredentialKey, CredentialSlot>,
+    #[serde(default)]
+    holds_screen: bool,
 }
 
 fn deserialize_unique_credentials<'de, D>(
@@ -334,6 +336,11 @@ pub struct Manifest {
     /// Iteration order matches manifest order.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub credentials: IndexMap<CredentialKey, CredentialSlot>,
+    /// Keep a scene showing this widget on screen: automatic scene cycling
+    /// pauses there until the user swipes to another scene. For widgets that
+    /// are operated for a while, such as a music player. Defaults to `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub holds_screen: bool,
 }
 
 impl FromStr for Manifest {
@@ -429,6 +436,7 @@ impl Manifest {
             supported_viewports: raw.supported_viewports,
             params: raw.params,
             credentials: raw.credentials,
+            holds_screen: raw.holds_screen,
         };
 
         for param in manifest.params.values_mut() {
@@ -793,6 +801,30 @@ mod tests {
         );
         let result = Manifest::from_str(&json);
         assert!(matches!(result, Err(ManifestError::SubnameTooLong { .. })));
+    }
+
+    #[test]
+    fn holds_screen_defaults_to_off_and_parses() {
+        let json = |extra: &str| {
+            format!(
+                r#"{{
+                "uid": "550e8400-e29b-41d4-a716-446655440000",
+                "version": "1.0.0",
+                "name": "Test Widget",
+                "description": "A test widget",
+                "binary": "bin/test",{extra}
+                "supported_viewports": [
+                    {{"type":"rectangular","min_width":317,"max_width":317,
+                     "min_height":238,"max_height":238,"min_dpi":1,"max_dpi":1}}
+                ]
+            }}"#
+            )
+        };
+        let plain = Manifest::from_str(&json("")).expect("BUG: should parse");
+        assert!(!plain.holds_screen);
+        let holding =
+            Manifest::from_str(&json(r#" "holds_screen": true,"#)).expect("BUG: should parse");
+        assert!(holding.holds_screen);
     }
 
     #[test]
