@@ -319,7 +319,7 @@ impl WidgetTracker {
         if self.drag_offset.is_some() {
             return None;
         }
-        let to_index = self.neighbor_index(1)?;
+        let to_index = self.automatic_next_index()?;
         let target = SceneTransitionTarget {
             from_index: self.current_index,
             to_index,
@@ -345,9 +345,26 @@ impl WidgetTracker {
         self.current_index
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn scene_count(&self) -> usize {
         self.scenes.len()
+    }
+
+    /// Scenes automatic cycling visits: those that don't hold the screen.
+    /// A holding scene is reached only by swiping.
+    #[must_use]
+    pub fn automatic_scene_count(&self) -> usize {
+        self.scenes.iter().filter(|s| !s.holds_screen).count()
+    }
+
+    /// The scene automatic cycling moves to: the next one after the active
+    /// scene that doesn't hold the screen.
+    fn automatic_next_index(&self) -> Option<usize> {
+        let len = self.scenes.len();
+        (1..len)
+            .map(|step| (self.current_index + step) % len)
+            .find(|&index| !self.scenes[index].holds_screen)
     }
 
     #[must_use]
@@ -485,6 +502,19 @@ impl WidgetTracker {
                     if widget.visible {
                         out.insert(widget.instance_id.clone(), LifecycleState::Prepared);
                     }
+                }
+            }
+        }
+
+        // Cycling may skip a scene that holds the screen, so warm up the
+        // scene it will actually move to as well.
+        if let Some(index) = self.automatic_next_index() {
+            for widget in &self.scenes[index].widgets {
+                if widget.visible
+                    && let Some(state) = out.get_mut(&widget.instance_id)
+                    && *state == LifecycleState::Dormant
+                {
+                    *state = LifecycleState::Prepared;
                 }
             }
         }
@@ -747,6 +777,34 @@ mod tests {
         assert_eq!(
             t.presented_widget_ids(),
             std::collections::HashSet::from([String::from("active"), String::from("next")])
+        );
+    }
+
+    #[test]
+    fn automatic_transition_skips_a_scene_that_holds_the_screen() {
+        let mut t = WidgetTracker::with_screen_width(1000);
+        t.set_scene_cycling(vec![
+            scene_with_widget("a"),
+            SceneLayout {
+                holds_screen: true,
+                ..scene_with_widget("music")
+            },
+            scene_with_widget("c"),
+        ]);
+        assert_eq!(t.automatic_scene_count(), 2);
+        assert_eq!(
+            t.lifecycle_states().get("c"),
+            Some(&LifecycleState::Prepared),
+            "the scene cycling goes to is warmed up"
+        );
+
+        let target = t.begin_automatic_transition_to_next();
+        assert_eq!(
+            target,
+            Some(SceneTransitionTarget {
+                from_index: 0,
+                to_index: 2,
+            })
         );
     }
 

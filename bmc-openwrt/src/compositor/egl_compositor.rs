@@ -1118,7 +1118,7 @@ impl AppState {
         self.automatic_cycling.reevaluate(
             now,
             self.compositor.widgets.can_drag(),
-            self.compositor.widgets.scene_count(),
+            self.compositor.widgets.automatic_scene_count(),
             touch_active,
         );
         if transition_was_active
@@ -1195,7 +1195,7 @@ impl AppState {
         self.sync_automatic_cycling_hold();
         self.automatic_cycling.reset_waiting(
             now,
-            self.compositor.widgets.scene_count(),
+            self.compositor.widgets.automatic_scene_count(),
             !self.active_touch_slots.is_empty(),
         );
         self.schedule_scene_cycling_timer(now);
@@ -1207,7 +1207,7 @@ impl AppState {
         self.automatic_cycling.reevaluate(
             now,
             self.compositor.widgets.can_drag(),
-            self.compositor.widgets.scene_count(),
+            self.compositor.widgets.automatic_scene_count(),
             true,
         );
         self.schedule_scene_cycling_timer(now);
@@ -4138,6 +4138,24 @@ mod tests {
         ]);
 
         assert_eq!(state.active_scene_cycle_duration(), duration);
+    }
+
+    #[test]
+    fn cycling_with_one_scene_besides_a_holding_one_stays_put() {
+        let mut state = make_app_state();
+        let now = Instant::now();
+        state.compositor.widgets.set_scene_cycling(vec![
+            test_scene("b"),
+            SceneLayout {
+                holds_screen: true,
+                ..test_scene("music")
+            },
+        ]);
+        state.reset_automatic_waiting(now);
+        assert!(matches!(
+            state.automatic_cycling.phase(),
+            AutomaticCyclingPhase::PausedDisabled { .. }
+        ));
     }
 
     #[test]
