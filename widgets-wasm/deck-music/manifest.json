@@ -8,6 +8,7 @@
   "binary": "bin/deck-music",
   "icon": "assets/icon.svg",
   "category": "media",
+  "holds_screen": true,
   "settings": [],
   "supported_viewports": [
     {
